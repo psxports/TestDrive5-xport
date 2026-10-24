@@ -18,11 +18,11 @@
   <PropertyGroup Condition="'$(Configuration)'=='Debug'"><TargetName>TD5_debug</TargetName></PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Release'"><TargetName>TD5</TargetName></PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
-    <ClCompile><WarningLevel>Level3</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DisableSpecificWarnings>4100;4244;4554;%(DisableSpecificWarnings)</DisableSpecificWarnings><SDLCheck>true</SDLCheck><PreprocessorDefinitions>GAPI_OGL;_DEBUG;XPORT_ENABLE_AUDIT;XPORT_MEMORY_DIAGNOSTICS;_CRT_SECURE_NO_WARNINGS;FULL_NAME=&quot;Test Drive 5&quot;;WND_TITLE=&quot;Test Drive 5 (xport)&quot;;WND_WIDTH=960;WND_HEIGHT=720;FIELD_RATE=60;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\..;$(ProjectDir)..\..\..\..\xport\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><CompileAs>CompileAsC</CompileAs><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary><DebugInformationFormat>ProgramDatabase</DebugInformationFormat><ProgramDataBaseFileName>$(IntDir)TD5-compile.pdb</ProgramDataBaseFileName><MultiProcessorCompilation>true</MultiProcessorCompilation></ClCompile>
+    <ClCompile><WarningLevel>Level3</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DisableSpecificWarnings>4100;4244;4554;%(DisableSpecificWarnings)</DisableSpecificWarnings><SDLCheck>true</SDLCheck><PreprocessorDefinitions>GAPI_OGL;XPORT_NATIVE_CALLBACK_BOOTSTRAP=1;_DEBUG;XPORT_ENABLE_AUDIT;XPORT_MEMORY_DIAGNOSTICS;_CRT_SECURE_NO_WARNINGS;FULL_NAME=&quot;Test Drive 5&quot;;WND_TITLE=&quot;Test Drive 5 (xport)&quot;;WND_WIDTH=960;WND_HEIGHT=720;FIELD_RATE=60;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\..;$(ProjectDir)..\..\..\..\xport\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><CompileAs>CompileAsC</CompileAs><Optimization>Disabled</Optimization><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary><DebugInformationFormat>ProgramDatabase</DebugInformationFormat><ProgramDataBaseFileName>$(IntDir)TD5-compile.pdb</ProgramDataBaseFileName><MultiProcessorCompilation>true</MultiProcessorCompilation></ClCompile>
     <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><ProgramDatabaseFile>$(IntDir)TD5_debug.pdb</ProgramDatabaseFile><ImportLibrary>$(IntDir)TD5_debug.lib</ImportLibrary><AdditionalDependencies>opengl32.lib;user32.lib;gdi32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
-    <ClCompile><WarningLevel>Level3</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DisableSpecificWarnings>4100;4244;4554;%(DisableSpecificWarnings)</DisableSpecificWarnings><SDLCheck>false</SDLCheck><PreprocessorDefinitions>GAPI_OGL;NDEBUG;XPORT_DISABLE_FUNCTION_MARKERS;_CRT_SECURE_NO_WARNINGS;FULL_NAME=&quot;Test Drive 5&quot;;WND_TITLE=&quot;Test Drive 5 (xport)&quot;;WND_WIDTH=960;WND_HEIGHT=720;FIELD_RATE=60;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\..;$(ProjectDir)..\..\..\..\xport\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><CompileAs>CompileAsC</CompileAs><Optimization>MinSpace</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><MultiProcessorCompilation>true</MultiProcessorCompilation><AdditionalOptions>/Gw /Gs2147483647 %(AdditionalOptions)</AdditionalOptions><ExceptionHandling>false</ExceptionHandling><BufferSecurityCheck>false</BufferSecurityCheck><OmitFramePointers>true</OmitFramePointers><RuntimeTypeInfo>false</RuntimeTypeInfo><ControlFlowGuard>false</ControlFlowGuard></ClCompile>
+    <ClCompile><WarningLevel>Level3</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><DisableSpecificWarnings>4100;4244;4554;%(DisableSpecificWarnings)</DisableSpecificWarnings><SDLCheck>false</SDLCheck><PreprocessorDefinitions>GAPI_OGL;XPORT_NATIVE_CALLBACK_BOOTSTRAP=1;NDEBUG;XPORT_DISABLE_FUNCTION_MARKERS;_CRT_SECURE_NO_WARNINGS;FULL_NAME=&quot;Test Drive 5&quot;;WND_TITLE=&quot;Test Drive 5 (xport)&quot;;WND_WIDTH=960;WND_HEIGHT=720;FIELD_RATE=60;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(ProjectDir)..\..;$(ProjectDir)..\..\..\..\xport\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><CompileAs>CompileAsC</CompileAs><Optimization>MinSpace</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><MultiProcessorCompilation>true</MultiProcessorCompilation><AdditionalOptions>/Gw /Gs2147483647 %(AdditionalOptions)</AdditionalOptions><ExceptionHandling>false</ExceptionHandling><BufferSecurityCheck>false</BufferSecurityCheck><OmitFramePointers>true</OmitFramePointers><RuntimeTypeInfo>false</RuntimeTypeInfo><ControlFlowGuard>false</ControlFlowGuard></ClCompile>
     <Link><SubSystem>Windows</SubSystem><GenerateDebugInformation>false</GenerateDebugInformation><ImportLibrary>$(IntDir)TD5.lib</ImportLibrary><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><AdditionalDependencies>opengl32.lib;user32.lib;gdi32.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies><RandomizedBaseAddress>false</RandomizedBaseAddress><FixedBaseAddress>true</FixedBaseAddress><ImageHasSafeExceptionHandlers Condition="'$(Platform)'=='Win32'">false</ImageHasSafeExceptionHandlers><GenerateManifest>false</GenerateManifest><DataExecutionPrevention>true</DataExecutionPrevention></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="..\..\game_main.c" /><ClCompile Include="..\..\..\..\xport\src\psx.c" /><ClCompile Include="..\..\..\..\xport\src\psx_gpu.c" /><ClCompile Include="..\..\..\..\xport\src\vid_ogl.c" /><ClCompile Include="..\..\..\..\xport\src\psx_spu.c" /><ClCompile Include="..\..\..\..\xport\src\psx_xa.c" /><ClCompile Include="..\..\..\..\xport\src\xport_trace.c" /><ClCompile Include="..\..\..\..\xport\src\platform\win\main.c"><PreprocessorDefinitions>SHORT_NAME=&quot;TD5&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions><ObjectFileName>$(IntDir)xport_main.obj</ObjectFileName></ClCompile></ItemGroup>
@@ -51,6 +51,29 @@
     <MASM Include="..\..\..\..\xport\src\platform\win\xcrt_x64.asm">
       <ExcludedFromBuild Condition="'$(XcrtEnabled)'!='true' or '$(Platform)'!='x64'">true</ExcludedFromBuild>
     </MASM>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\batch_1.c" />
+    <ClCompile Include="..\..\batch_2.c" />
+    <ClCompile Include="..\..\batch_3.c" />
+    <ClCompile Include="..\..\batch_4.c" />
+    <ClCompile Include="..\..\batch_5.c" />
+    <ClCompile Include="..\..\batch_6.c" />
+    <ClCompile Include="..\..\batch_7.c" />
+    <ClCompile Include="..\..\batch_8.c" />
+    <ClCompile Include="..\..\batch_9.c" />
+    <ClCompile Include="..\..\batch_10.c" />
+    <ClCompile Include="..\..\batch_11.c" />
+    <ClCompile Include="..\..\batch_12.c" />
+    <ClCompile Include="..\..\batch_13.c" />
+    <ClCompile Include="..\..\batch_14.c" />
+    <ClCompile Include="..\..\batch_15.c" />
+    <ClCompile Include="..\..\batch_16.c" />
+    <ClCompile Include="..\..\batch_17.c" />
+    <ClCompile Include="..\..\batch_18.c" />
+    <ClCompile Include="..\..\batch_19.c" />
+    <ClCompile Include="..\..\batch_20.c" />
+    <ClCompile Include="..\..\batch_21.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets"><Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" /></ImportGroup>

@@ -231,8 +231,9 @@ uint32 td5_800585e4(void)
             return result;
         case 3:
             w_u32(0x80087694, 1);
-            w_u32(0x80088520, 20);
-            return 20;
+            td5_save_game();
+            w_u32(0x80087694, 0);
+            return r_u32(0x80088520);
         default:
             w_u16(0x80088794, 1);
             w_u32(0x8008858C, 0);

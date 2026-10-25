@@ -220,6 +220,8 @@ sint32 td5_open_data_archive(uint32 filename)
 
     FUNCTION_MARKER(0x8007B838, "SLUS_006.10");
     td5_debug_log(0x80013C88, filename);
+    if (td5_use_extracted_assets())
+        return 0;
     td5_load_archive_directory(filename);
     for (index = 0; index < 512; ++index)
     {
@@ -625,6 +627,10 @@ uint32 td5_show_legal_image(uint32 buffer, uint32 filename, sint32 seconds, uint
     uint32 other;
     uint32 elapsed;
     uint32 name_length;
+    uint32 buttons;
+    uint32 skippable;
+    uint32 previous_buttons;
+    uint32 pressed;
     PSX_RECT rectangle;
 
     FUNCTION_MARKER(0x80019EA0, "SLUS_006.10");
@@ -662,11 +668,22 @@ uint32 td5_show_legal_image(uint32 buffer, uint32 filename, sint32 seconds, uint
     VSync(0);
     SetDispMask(1);
     elapsed = 0;
+    /* Require a fresh Cross/Start press for each startup splash */
+    skippable = filename == 0x80010258 || filename == 0x80010268;
+    previous_buttons = skippable ? xport_input_read(0) | xport_input_read(1) : 0;
     while ((sint32)elapsed < (sint32)((uint32)seconds * r_u32(0x800880FC)))
     {
         SetDispMask(1);
         VSync(0);
         ++elapsed;
+        if (skippable)
+        {
+            buttons = xport_input_read(0) | xport_input_read(1);
+            pressed = buttons & ~previous_buttons;
+            previous_buttons = buttons;
+            if ((pressed & (PADstart | PADRdown)) != 0)
+                break;
+        }
     }
     return elapsed;
 }
@@ -936,12 +953,7 @@ sint32 td5_80055b3c(void)
     FUNCTION_MARKER(0x80055B3C, "SLUS_006.10");
     if (!td5_memory_card_enabled)
     {
-        // TODO: Replace card setup with native xport_save/load integration
-        for (index = 0; index < 62; ++index)
-            VSync(0);
         td5_init_pad();
-        for (index = 0; index < 11; ++index)
-            VSync(0);
         return 0;
     }
     for (index = 0; index < 15; ++index)
@@ -981,6 +993,22 @@ void td5_init_pad(void)
         w_u8(0x80088688 + index, 0);
 }
 
+void td5_wait_loading_screen(void)
+{
+    uint32 elapsed, buttons, previous;
+    uint32 fields = r_u32(0x800880FC) * 4;
+
+    previous = (xport_input_read(0) | xport_input_read(1)) & (PADRdown | PADstart);
+    for (elapsed = 0; elapsed < fields; ++elapsed)
+    {
+        VSync(0);
+        buttons = (xport_input_read(0) | xport_input_read(1)) & (PADRdown | PADstart);
+        if ((buttons & ~previous) != 0)
+            break;
+        previous = buttons;
+    }
+}
+
 void td5_fade_audio(void)
 {
     uint32 initial;
@@ -992,7 +1020,7 @@ void td5_fade_audio(void)
     current = initial;
     while ((sint32)current >= 0)
     {
-        w_u32(0x80087700, current - 32);
+        w_u32(0x80087700, current - 64);
         td5_update_cd_volume();
         volume = r_u32(0x80087700) << 2;
         w_u16(0x800920A8, (uint16)volume);
@@ -1033,6 +1061,9 @@ sint32 td5_800557c0(void)
     uint8 mode = 128;
 
     FUNCTION_MARKER(0x800557C0, "SLUS_006.10");
+#if AP_WEB
+    CdControl(CdlStop, 0, 0);
+#endif
     return CdControlB(14, &mode, 0);
 }
 
@@ -1059,6 +1090,29 @@ sint32 td5_play_xa(sint32 track)
     CdlATV mix;
 
     FUNCTION_MARKER(0x800558C8, "SLUS_006.10");
+#if AP_WEB
+    {
+        char path[64];
+        sint32 result;
+        SpuCommonAttr sound = {0};
+        w_u8(0x800884F4, (uint8)track);
+        sound.mask = SPU_COMMON_CDVOLL | SPU_COMMON_CDVOLR | SPU_COMMON_CDMIX;
+        sound.cd.volume.left = sound.cd.volume.right = 0x3FFF;
+        sound.cd.mix = SPU_ON;
+        SpuSetCommonAttr(&sound);
+        snprintf(path, sizeof(path), "MUSIC/%s_%d.XA", track < 8 ? "PRES" : "GAME",
+            track < 8 ? track : track - 8);
+        result = xport_xa_play_file(path, 1);
+        if (!result)
+        {
+            xport_message_error("Test Drive 5 - Music error", path);
+            exit(EXIT_FAILURE);
+        }
+        CdControl(CdlDemute, 0, 0);
+        td5_update_cd_volume();
+        return result;
+    }
+#endif
     duration = r_u32(0x8007EA20 + (uint32)track * 4);
     w_u8(0x800884F4, (uint8)track);
     duration <<= 3;
@@ -1622,7 +1676,8 @@ uint32 td5_load_archive_file(const char *filename, uint32 destination, uint32 mi
     sint32 found = 0;
 
     FUNCTION_MARKER(0x8007BA58, "SLUS_006.10");
-    VSync(0);
+    if (td5_use_extracted_assets())
+        return td5_read_extracted_file(filename, destination);
     if (r_s32(0x8008816C) > 0)
     {
         entry = 0x80092648;
@@ -1662,6 +1717,8 @@ uint32 td5_archive_file_size(const char *filename, sint32 enabled, uint32 missin
     FUNCTION_MARKER(0x8007BD44, "SLUS_006.10");
     if (enabled == 0)
         return prior_result;
+    if (td5_use_extracted_assets())
+        return td5_extracted_file_size(filename);
     if (r_s32(0x8008816C) > 0)
     {
         entry = 0x80092648;

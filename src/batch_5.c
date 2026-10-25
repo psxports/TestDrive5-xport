@@ -1898,7 +1898,6 @@ uint32 td5_80013d20(void)
     uint32 index;
     uint32 value;
     uint32 result;
-    uint32 previous_sync;
     sint32 node;
     sint32 lane;
 
@@ -1906,7 +1905,6 @@ uint32 td5_80013d20(void)
     w_u32(0x80088498, 0);
     value = r_u32(0x80088498);
     w_u32(0x800875F0, value);
-    previous_sync = (uint32)VSync(-1);
     w_u32(0x800884E4, 1);
     for (index = 0; (sint32)index < r_s32(0x800875E4); ++index)
         td5_8001affc(0x800984A0 + index * 864);
@@ -1926,13 +1924,6 @@ uint32 td5_80013d20(void)
         td5_800357e4(node, lane);
         DrawSync(0);
         td5_8005ae14();
-        if (r_u32(0x80088498) == 0 || r_u32(0x80088460) == 0)
-        {
-            while ((sint32)((uint32)VSync(-1) - previous_sync) < 2)
-            {
-            }
-            previous_sync = (uint32)VSync(-1);
-        }
         td5_800341fc();
     }
 }

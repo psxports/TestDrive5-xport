@@ -1,5 +1,6 @@
 #include "td5_functions.h"
 #include <string.h>
+#include <stdlib.h>
 
 void *td5_800689c0(const char *pattern, void *record)
 {
@@ -762,36 +763,56 @@ uint32 td5_800b7294(uint32 records)
     return 0xFFFF;
 }
 
-void td5_movie_exec_stub(uint32 executable, uint32 argument_count, uint32 arguments)
+void td5_play_movies(uint32 mode)
 {
-    /* User-authorized MOVPLAY execution boundary skips video playback */
-    (void)executable;
-    (void)argument_count;
-    (void)arguments;
+#if !defined(AP_WEB)
+    CdlFILE music;
+#endif
+#if defined(AP_WEB)
+    const char *path = mode ? "DATA/FEAR.STR" : "DATA/INTO.STR";
+#else
+    const char *path = mode ? "DATA/FEAR.STR" : "DATA/LOGO.STR";
+#endif
+    sint32 result;
+
+    /* The replaced executable normally restarts callbacks before playback */
+    ResetCallback();
+    /* Startup movies precede the game's sound initialization */
+    if (!xport_audio_init())
+    {
+        xport_message_error("Test Drive 5", "Cannot initialize audio for video playback");
+        exit(EXIT_FAILURE);
+    }
+    result = xport_fmv_play(path);
+
+#if !defined(AP_WEB)
+    if ((result == 1 || result == 2) && mode == 0)
+    {
+        path = "DATA/INTO.STR";
+        result = xport_fmv_play(path);
+    }
+#endif
+    if (result != 1 && result != 2)
+    {
+        xport_message_error("Test Drive 5: video playback failed", path);
+        exit(EXIT_FAILURE);
+    }
+#if !AP_WEB
+    /* The fullscreen player releases its CD source on return */
+    if (!td5_mount_xa_file(r_u32(0x80087BE4), &music))
+    {
+        xport_message_error("Test Drive 5", "Cannot restore the DATA XA stream after video playback");
+        exit(EXIT_FAILURE);
+    }
+#endif
 }
 
 sint32 td5_8001acfc(void)
 {
-    uint32 executable;
     uint32 value;
 
     FUNCTION_MARKER(0x8001ACFC, "SLUS_006.10");
-    w_u32(0x8008817C, 0x800BF800);
-    executable = r_u32(0x8008817C);
-    td5_load_cd_file(0x800102DC, executable);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 16);
-    td5_debug_log(0x800106E8, value);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 24);
-    td5_debug_log(0x800106F4, value);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 28);
-    td5_debug_log(0x80010704, value);
-    executable = r_u32(0x8008817C);
-    w_u32(executable + 48, 0x801DFFF0);
-    executable = r_u32(0x8008817C);
-    w_u32(executable + 52, 0);
+    /* Movie playback no longer loads or executes the PS1 player */
     DrawSync(0);
     StopRCnt(0xF2000000, 0x80086B0C, 0x80086B14);
     StopRCnt(0xF2000001, 0x80086B0C, 0x80086B14);
@@ -802,8 +823,7 @@ sint32 td5_8001acfc(void)
     EnterCriticalSectionPSX();
     value = r_u32(0x80087618);
     w_u8(value, 0);
-    executable = r_u32(0x8008817C);
-    td5_movie_exec_stub(executable + 16, 1, 0);
+    td5_play_movies(r_u8(r_u32(0x80087618)));
     ResetCallback();
     return CdInit();
 }
@@ -1162,8 +1182,12 @@ uint32 td5_8005a3d0(void)
     rectangle.y = (sint16)((flip ^ 1) << 8);
     MoveImage(&rectangle, 0, (sint32)(flip << 8));
     td5_800544f8();
+#if AP_WEB
+    td5_80055a58();
+#else
     if (r_u32(0x80087730) != 0)
         td5_80055a58();
+#endif
     flip = r_u32(0x8008810C);
     width = r_u32(0x800880F4);
     height = r_u32(0x800880F8);
@@ -1263,8 +1287,12 @@ uint32 td5_8005a3d0(void)
         }
     }
     td5_800545a4();
+#if AP_WEB
+    td5_80055a80();
+#else
     if (r_u32(0x80087730) != 0)
         td5_80055a80();
+#endif
     restore = r_u32(0x80088698);
     result = r_u32(0x8008772C);
     w_u16(0x800884E8, 0);
@@ -1618,8 +1646,13 @@ process_request:
             td5_debug_log(0x800132A0, index, r_u32(entry + 16));
             count = r_u32(entry + 8);
             destination = r_u32(entry + 16);
-            sector = r_u16(entry + 2) + r_u32(entry + 4);
-            td5_read_archive_sectors(sector, count, destination);
+            if (td5_use_extracted_assets())
+                td5_read_stream_asset(index, r_u16(entry + 2) * 2048, count * 2048, destination);
+            else
+            {
+                sector = r_u16(entry + 2) + r_u32(entry + 4);
+                td5_read_archive_sectors(sector, count, destination);
+            }
             w_u32(0x800880D0, 0xFFFFFFFB);
             return 0xFFFFFFFB;
         }

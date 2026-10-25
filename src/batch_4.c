@@ -1784,6 +1784,19 @@ uint32 td5_8005a860(uint32 slot, const char *filename)
     uint32 value;
 
     FUNCTION_MARKER(0x8005A860, "SLUS_006.10");
+    if (td5_use_extracted_assets())
+    {
+        td5_bind_stream_asset(slot, filename);
+        offset = slot * 24;
+        w_u16(0x800A4E28 + offset, 1);
+        w_u16(0x800A4E2A + offset, 0);
+        w_u32(0x800A4E2C + offset, 0);
+        w_u32(0x800A4E30 + offset, 0);
+        w_u32(0x800A4E34 + offset, td5_extracted_file_size(filename));
+        w_u32(0x800A4E38 + offset, 0);
+        w_u32(0x800A4E3C + offset, 0x8005A840);
+        return offset;
+    }
     index = td5_8007b7b8(filename);
     offset = slot * 24;
     w_u16(0x800A4E28 + offset, 1);

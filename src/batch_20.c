@@ -765,6 +765,14 @@ static void td5_menu_update_selection(uint32 address, sint32 count)
     td5_800574f0((sint32)selected, count);
 }
 
+uint32 td5_menu_find_string(uint32 text, uint32 needle)
+{
+    const char *start = td5_menu_string(text);
+    const char *match = strstr(start, td5_menu_string(needle));
+
+    return match ? text + (uint32)(match - start) : 0;
+}
+
 uint32 td5_menu_copy_string(uint32 destination, uint32 source)
 {
     const char *text = td5_menu_string(source);
@@ -778,7 +786,7 @@ static void td5_menu_variant_label(void)
 {
     uint32 destination, format;
 
-    destination = td5_menu_copy_string(r_u32(0x800BCF84), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BCF84), 0x800A5E70);
     format = r_u32(0x80087718) != 0 ? 0x800A5EEC : 0x800A5EE4;
     td5_menu_copy_string(destination + 3, format);
 }
@@ -1877,7 +1885,7 @@ void td5_800aaf68(void)
         td5_80053030();
         w_u32(0x80087708, r_u32(0x80087708) ^ 1);
     }
-    destination = td5_menu_copy_string(r_u32(0x800BCFFC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BCFFC), 0x800A5E70);
     format = r_u32(0x80087708) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
     y = 80;

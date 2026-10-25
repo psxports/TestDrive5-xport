@@ -63,63 +63,19 @@ uint32 td5_800bbac8(void)
 
 void td5_800adc90(uint32 invalid_header_index)
 {
-    uint32 ticks, state, value, x, y;
+    uint32 x, y;
 
     FUNCTION_MARKER(0x800ADC90, "SLUS_006.10");
-    ticks = r_u32(0x800AEA30);
-    state = r_u32(0x800B02D0);
-    w_u32(0x800AEA30, ticks + 1);
-    if (state == 0)
-    {
-        w_u8(0x800BD340, 1);
-        w_u8(0x800BD3B8, 1);
-    }
-    state = r_u32(0x800B02D0);
-    if (state == 1)
-    {
-        if (r_u32(0x800B02C8) == state)
-        {
-            w_u8(0x800BD430, 1);
-            w_u8(0x800BD4A8, 1);
-            w_u8(0x800BD520, 1);
-        }
-        if (r_u32(0x800B02C8) == 2)
-        {
-            w_u8(0x800BD430, 1);
-            w_u8(0x800BD4A8, 1);
-            w_u8(0x800BD598, 1);
-        }
-        if (r_u32(0x800B02C8) - 1 >= 2)
-            w_u32(0x800AEA2C, state);
-    }
-    if (r_u32(0x800B02D0) == 2)
-    {
-        x = r_u32(0x800876F8);
-        y = r_u32(0x800876FC);
-        w_u32(0x800AEA2C, 1);
-        w_u16(0x800976CC, x);
-        w_u16(0x80097740, x);
-        w_u16(0x800976CE, y);
-        w_u16(0x80097742, y);
-        td5_update_cd_volume();
-    }
-    if ((r_u32(0x800AEA30) & 15) == 0)
-    {
-        state = r_u32(0x800B02D0);
-        w_u32(0x800AEA30, 0);
-        if (state == 1)
-        {
-            value = td5_800bbac8();
-            w_u32(0x800B02C8, value);
-            w_u32(0x800B02D0, 2);
-        }
-        if (r_u32(0x800B02D0) == 0)
-        {
-            value = td5_800bb948(invalid_header_index);
-            w_u32(0x800B02C8, value);
-            w_u32(0x800B02D0, 1);
-        }
-    }
+    (void)invalid_header_index;
+    td5_load_game();
+    w_u32(0x800AEA2C, 1);
+    x = r_u32(0x800876F8);
+    y = r_u32(0x800876FC);
+    w_u16(0x800976CC, x);
+    w_u16(0x80097740, x);
+    w_u16(0x800976CE, y);
+    w_u16(0x80097742, y);
+    td5_update_cd_volume();
 }
 
 static void td5_800ad54c(void)
@@ -700,19 +656,19 @@ void td5_800ab3b0(void)
             }
         }
     }
-    destination = td5_menu_copy_string(r_u32(0x800BCF0C), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BCF0C), 0x800A5E70);
     format = r_u32(0x800876C4) != 0 ? 0x800A5E80 : 0x800A5E7C;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BCF84), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BCF84), 0x800A5E70);
     format = r_u32(0x800876CC) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BCFFC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BCFFC), 0x800A5E70);
     format = r_u32(0x800876C8) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BD074), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD074), 0x800A5E70);
     format = r_u32(0x800876D0) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BD0EC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD0EC), 0x800A5E70);
     value = r_u32(0x800876D4);
     if (value == 0)
     {
@@ -726,22 +682,22 @@ void td5_800ab3b0(void)
     }
     if (value == 2)
         td5_menu_copy_string(destination + 3, 0x800A5E94);
-    destination = td5_menu_copy_string(r_u32(0x800BD164), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD164), 0x800A5E70);
     format = r_u32(0x800876D8) != 0 ? 0x800A5EA8 : 0x800A5E9C;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BD1DC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD1DC), 0x800A5E70);
     format = r_u32(0x800876E8) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BD254), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD254), 0x800A5E70);
     value = r_u32(0x800876E4);
     td5_menu_format_number(destination + 3, 0x800A5EB4, value + 1);
-    destination = td5_menu_copy_string(r_u32(0x800BD2CC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD2CC), 0x800A5E70);
     format = r_u32(0x800876F0) != 0 ? 0x800A5E78 : 0x800A5E74;
     td5_menu_copy_string(destination + 3, format);
-    destination = td5_menu_copy_string(r_u32(0x800BD344), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD344), 0x800A5E70);
     value = r_u32(0x800876DC);
     td5_menu_format_number(destination + 3, 0x800A5EB4, value + 1);
-    destination = td5_menu_copy_string(r_u32(0x800BD3BC), 0x800A5E70);
+    destination = td5_menu_find_string(r_u32(0x800BD3BC), 0x800A5E70);
     value = r_u32(0x800876E0);
     td5_menu_format_number(destination + 3, 0x800A5EB4, value + 1);
 }
@@ -1374,6 +1330,17 @@ void td5_800a8a48(uint32 slot, uint32 inherited_s3)
 }
 
 static char td5_archive_path[512];
+static char td5_stream_paths[2][512];
+
+sint32 td5_use_extracted_assets(void)
+{
+#if AP_WEB || AP_WIN
+    // Temporarily enable extracted Windows assets for Web collection
+    return 1;
+#else
+    return 0;
+#endif
+}
 
 static void td5_file_error(const char *path, const char *operation)
 {
@@ -1384,9 +1351,8 @@ static void td5_file_error(const char *path, const char *operation)
     exit(EXIT_FAILURE);
 }
 
-static void td5_data_path(char *path, uint32 filename)
+static void td5_named_data_path(char *path, const char *name)
 {
-    const char *name = td5_menu_string(filename);
     size_t index = 5;
 
     memcpy(path, "DATA/", 5);
@@ -1400,6 +1366,62 @@ static void td5_data_path(char *path, uint32 filename)
         ++name;
     }
     path[index] = 0;
+}
+
+static void td5_data_path(char *path, uint32 filename)
+{
+    td5_named_data_path(path, td5_menu_string(filename));
+}
+
+static uint32 td5_open_asset(const char *path, FILE **file)
+{
+    long length;
+
+    *file = xport_fopen(path, "rb");
+    if (*file == 0)
+        td5_file_error(path, "Cannot open asset");
+    if (fseek(*file, 0, SEEK_END) != 0 || (length = ftell(*file)) < 0 ||
+        fseek(*file, 0, SEEK_SET) != 0)
+    {
+        fclose(*file);
+        td5_file_error(path, "Cannot determine asset size");
+    }
+    return (uint32)length;
+}
+
+uint32 td5_extracted_file_size(const char *filename)
+{
+    char path[512];
+    FILE *file;
+    uint32 bytes;
+
+    td5_named_data_path(path, filename);
+    bytes = td5_open_asset(path, &file);
+    fclose(file);
+    return bytes;
+}
+
+uint32 td5_read_extracted_file(const char *filename, uint32 destination)
+{
+    char path[512];
+    FILE *file;
+    uint32 bytes;
+    size_t count;
+
+    td5_named_data_path(path, filename);
+    bytes = td5_open_asset(path, &file);
+    count = xport_fread(psx_addr(destination, bytes), 1, bytes, file);
+    fclose(file);
+    if (count != bytes)
+        td5_file_error(path, "Asset read failed or ended early");
+    return bytes;
+}
+
+void td5_bind_stream_asset(uint32 slot, const char *filename)
+{
+    if (slot >= 2)
+        td5_file_error(filename, "Invalid asset stream slot");
+    td5_named_data_path(td5_stream_paths[slot], filename);
 }
 
 static void td5_read_data_range(const char *path, uint32 offset, uint32 bytes, uint32 destination)
@@ -1428,6 +1450,13 @@ static void td5_read_data_range(const char *path, uint32 offset, uint32 bytes, u
         td5_file_error(path, "Asset read failed or ended early");
     }
     fclose(file);
+}
+
+void td5_read_stream_asset(uint32 slot, uint32 offset, uint32 bytes, uint32 destination)
+{
+    if (slot >= 2 || td5_stream_paths[slot][0] == 0)
+        td5_file_error("DATA", "Asset stream has not been opened");
+    td5_read_data_range(td5_stream_paths[slot], offset, bytes, destination);
 }
 
 uint32 td5_read_data_file(uint32 filename, uint32 destination)

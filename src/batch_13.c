@@ -1191,7 +1191,16 @@ void td5_800a7b84(uint32 archive_error_index, uint32 original_stack, uint32 inva
     length = sprintfPSX(frame + 0x20, 0x800A538C, value + 1);
     allocation = r_u32(0x80088608);
     td5_load_archive_file((const char *)psx_addr(frame + 0x20, length + 1), allocation, archive_error_index);
-    td5_fade_audio();
+    if (r_u32(0x80087654) == 0)
+    {
+        td5_800557c0();
+        td5_stop_sound_voice(20);
+    }
+    else
+    {
+        td5_wait_loading_screen();
+        td5_fade_audio();
+    }
     random = randPSX();
     td5_play_xa(random % 9);
     td5_800b25e0();
@@ -1570,9 +1579,9 @@ void td5_8001a26c(void)
 sint32 td5_8001a28c(void)
 {
     FUNCTION_MARKER(0x8001A28C, "SLUS_006.10");
-    /* The authorized movie stub does not need an external player image */
+    /* The native movie boundary does not execute an external player image */
     td5_8001a26c();
-    td5_movie_exec_stub(0x800FF810, 0, 0);
+    td5_play_movies(r_u8(r_u32(0x80087618)));
     stopIntr();
     ResetCallback();
     CdInit();
@@ -1591,25 +1600,10 @@ sint32 td5_8007b9b8(uint32 filename, uint32 destination, sint32 bytes)
 
 sint32 td5_8001ae4c(void)
 {
-    uint32 executable, value;
+    uint32 value;
 
     FUNCTION_MARKER(0x8001AE4C, "SLUS_006.10");
-    w_u32(0x8008817C, 0x800BF800);
-    executable = r_u32(0x8008817C);
-    td5_load_cd_file(0x800102DC, executable);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 16);
-    td5_debug_log(0x800106E8, value);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 24);
-    td5_debug_log(0x800106F4, value);
-    executable = r_u32(0x8008817C);
-    value = r_u32(executable + 28);
-    td5_debug_log(0x80010704, value);
-    executable = r_u32(0x8008817C);
-    w_u32(executable + 48, 0x801DFFF0);
-    executable = r_u32(0x8008817C);
-    w_u32(executable + 52, 0);
+    /* Movie playback no longer loads or executes the PS1 player */
     DrawSync(0);
     td5_80055efc();
     StopRCnt(0xF2000000, 0x80086B0C, 0x80086B14);
@@ -1622,8 +1616,7 @@ sint32 td5_8001ae4c(void)
     EnterCriticalSectionPSX();
     value = r_u32(0x80087618);
     w_u8(value, 1);
-    executable = r_u32(0x8008817C);
-    td5_movie_exec_stub(executable + 16, 1, 0);
+    td5_play_movies(r_u8(r_u32(0x80087618)));
     ResetCallback();
     CdInit();
     ResetGraph(3);

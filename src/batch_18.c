@@ -346,7 +346,7 @@ void td5_800b633c(uint32 mode, uint32 original_stack)
     {
     case 0:
         index = r_u32(0x800BC164);
-        w_u8(0x800BCF08, 1);
+        w_u8(0x800BCF08, 0);
         w_u8(0x800BCF80, 1);
         w_u8(0x800BCFF8, 1);
         if (index == 0)
@@ -355,7 +355,7 @@ void td5_800b633c(uint32 mode, uint32 original_stack)
         if (index == count - 1)
             w_u8(0x800BCFF8, 0);
         signed_selection = r_s16(0x800BF3B8 + index * 2);
-        w_u32(0x800BC15C, 4096);
+        w_u32(0x800BC15C, 0);
         w_u32(0x800BC89C, (uint32)signed_selection);
         td5_800b46d8(frame);
         td5_800b44f8(frame);
@@ -407,12 +407,11 @@ void td5_800b633c(uint32 mode, uint32 original_stack)
             td5_800530f0();
             w_u32(0x800BC16C, 0);
             if (mode == 0 || r_u32(0x80087728) != 3 || r_u32(0x80087720) != 2)
+            {
                 w_u32(0x800BC8A0, 13);
+                return;
+            }
         }
-        value = r_u32(0x800BC16C) + 1;
-        w_u32(0x800BC16C, value);
-        if ((sint32)value < 31)
-            return;
         index = r_u32(0x800BC164);
         signed_selection = r_s16(0x800BF3B8 + index * 2);
         w_u32(0x800BCB38, 0);
@@ -439,8 +438,14 @@ void td5_800b633c(uint32 mode, uint32 original_stack)
             w_u8(0x800BC928 + value * 12, 2);
             td5_8005a9f0(0);
             td5_debug_log(0x800B0C94);
+            td5_800b3c50();
         }
         w_u32(0x800BC89C, (uint32)signed_selection);
+        value = r_u32(0x800BC16C) + 1;
+        w_u32(0x800BC16C, value);
+        /* Populate both retained text buffers before leaving the refresh phase */
+        if (value < 3)
+            return;
         if (r_u8(0x800BC928 + selected * 12) != 0)
         {
             w_u32(0x800BC8A0, 2);
@@ -653,25 +658,7 @@ void td5_800b633c(uint32 mode, uint32 original_stack)
         w_u32(0x800BC8A0, 6);
         return;
     case 12:
-        if (r_s32(0x800BC15C) < 4096)
-        {
-            td5_800b46d8(frame);
-            w_u32(0x800BC15C, r_u32(0x800BC15C) + 140);
-        }
-        value = r_u32(0x800BC158);
-        if ((sint32)value > 0)
-        {
-            w_u32(0x800BC158, value - 128);
-            return;
-        }
-        goto release_carousel;
     case 13:
-        if (r_s32(0x800BC15C) < 4096)
-        {
-            td5_800b46d8(frame);
-            w_u32(0x800BC15C, r_u32(0x800BC15C) + 140);
-            return;
-        }
         goto release_carousel;
     default:
         return;
@@ -1042,6 +1029,38 @@ uint32 td5_800bb458(uint32 source)
     td5_800bb3b0(0x8008CF70, 36);
     td5_800bb3b0(0x8007C4D4, 1410);
     return td5_800bb330(0x8009DB38, 101);
+}
+
+/* Native storage uses the original 6303-byte game payload */
+#define TD5_SAVE_SIZE 6303
+
+sint32 td5_save_game(void)
+{
+    uint32 allocation = td5_alloc_memory(TD5_SAVE_SIZE);
+    sint32 result;
+
+    td5_800bad98(allocation);
+    result = xport_save(psx_addr(allocation, TD5_SAVE_SIZE), TD5_SAVE_SIZE);
+    td5_free_memory(allocation);
+    if (result != 1)
+        xport_message_error("Test Drive 5", "Unable to save game progress");
+    return result;
+}
+
+sint32 td5_load_game(void)
+{
+    uint32 allocation = td5_alloc_memory(TD5_SAVE_SIZE);
+    sint32 result = xport_load(psx_addr(allocation, TD5_SAVE_SIZE), TD5_SAVE_SIZE);
+
+    if (result == TD5_SAVE_SIZE)
+        td5_800bb458(allocation);
+    td5_free_memory(allocation);
+    if (result != 0 && result != TD5_SAVE_SIZE)
+    {
+        xport_message_error("Test Drive 5", "Unable to load game progress");
+        return -1;
+    }
+    return result != 0;
 }
 
 // TODO: Read the game payload through xport_load and adapt the card-slot UI

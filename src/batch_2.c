@@ -13,6 +13,8 @@ uint32 td5_archive_aligned_size(const char *filename, sint32 enabled, uint32 mis
     FUNCTION_MARKER(0x8007BC84, "SLUS_006.10");
     if (enabled == 0)
         return prior_result;
+    if (td5_use_extracted_assets())
+        return td5_extracted_file_size(filename);
     if (r_s32(0x8008816C) > 0)
     {
         entry = 0x80092648;
@@ -235,20 +237,9 @@ sint32 td5_move_menu_selection(sint32 original, sint32 count)
 
 void td5_8001a0dc(uint32 buffer, uint32 archive_error_index)
 {
-    uint32 image_y;
-    uint32 palette_y;
-    char filename[64];
-
     FUNCTION_MARKER(0x8001A0DC, "SLUS_006.10");
     td5_show_legal_image(buffer, 0x80010258, 6, archive_error_index);
     td5_show_legal_image(buffer, 0x80010268, 1, archive_error_index);
-    sprintf(filename, (const char *)psx_addr(0x80010244, 17));
-    td5_load_archive_file(filename, buffer, archive_error_index);
-    image_y = r_u32(0x80088104) << 8;
-    palette_y = (r_u32(0x80088104) << 8) + 80;
-    td5_upload_tim(buffer, 0, (sint16)image_y, 0, (sint16)palette_y);
-    SetDispMask(1);
-    td5_init_loading_primitive();
 }
 
 sint32 td5_8001a4d8(void)
@@ -350,8 +341,6 @@ void td5_80019bb8(uint32 image, uint32 archive_error_index)
     uint32 next;
     uint32 environment;
     uint32 other;
-    uint32 image_y;
-    uint32 palette_y;
     PSX_RECT rectangle;
     char filename[64];
 
@@ -392,13 +381,7 @@ void td5_80019bb8(uint32 image, uint32 archive_error_index)
     LoadImagePSX(&rectangle, (uint32 *)psx_addr(image + 20, 320 * 256 * 2));
     DrawSync(0);
     VSync(0);
-    sprintf(filename, (const char *)psx_addr(0x80010244, 17));
-    td5_load_archive_file(filename, image, archive_error_index);
-    image_y = r_u32(0x80088104) << 8;
-    palette_y = (r_u32(0x80088104) << 8) + 80;
-    td5_upload_tim(image, 0, (sint16)image_y, 0, (sint16)palette_y);
     SetDispMask(1);
-    td5_init_loading_primitive();
 }
 
 uint32 td5_find_flare_textures(void)
@@ -1463,14 +1446,11 @@ sint32 td5_8001492c(uint32 archive_error_index, uint32 original_stack, uint32 te
     }
     td5_8001f844();
     w_u32(0x800884E4, 1);
+    td5_wait_loading_screen();
     td5_fade_audio();
-    for (index = 0; index < 5; ++index)
-        VSync(0);
     td5_80052924(0, sound_name_address);
     td5_80052924(1, sound_name_address);
     td5_80052b74(r_s32(0x8008762C) % 13, archive_error_index, original_stack - 0xC8);
-    for (index = 0; index < 8; ++index)
-        VSync(0);
     td5_set_engine_parameter(0);
     td5_start_engine_sound(0x80098664, 0x80098634);
     td5_set_engine_parameter(0);
@@ -1676,12 +1656,9 @@ uint32 td5_80052924(sint32 car, uint32 original_name_address)
     uint32 sound;
     uint32 transfer_address;
     uint32 payload;
-    uint32 index;
     char filename[256];
 
     FUNCTION_MARKER(0x80052924, "SLUS_006.10");
-    for (index = 0; index < 5; ++index)
-        VSync(0);
     td5_alloc_scene_memory(0x20000, owner);
     selection = 0x8008CF72 + (uint32)car * 24 + r_u32(0x8008871C);
     car_id = r_s8(selection);

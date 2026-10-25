@@ -1023,6 +1023,20 @@ uint32 td5_80047278(uint32 slot, sint32 digit, uint32 red, uint32 green, uint32 
     return value;
 }
 
+#if AP_WEB
+static sint32 td5_play_race_xa(sint32 track)
+{
+    SpuCommonAttr sound = {0};
+    sint32 result = td5_play_xa(track);
+
+    /* Match the native VAG voice gain without a second half-volume CD stage */
+    sound.mask = SPU_COMMON_CDVOLL | SPU_COMMON_CDVOLR;
+    sound.cd.volume.left = sound.cd.volume.right = 0x7FFF;
+    SpuSetCommonAttr(&sound);
+    return result;
+}
+#endif
+
 uint32 td5_80047790(void)
 {
     uint32 view;
@@ -1075,7 +1089,12 @@ uint32 td5_80047790(void)
     value = r_u32(0x8008772C);
     if (value != 0)
         return value;
+#if AP_WEB
+    /* Rotate full race tracks independently of the selected circuit */
+    return (uint32)td5_play_race_xa((sint32)((r_u32(0x8008762C) - 1) % 8) + 8);
+#else
     return (uint32)td5_8005490c(13, 20, r_s32(0x80087700), 0, 0x1400);
+#endif
 }
 
 uint32 td5_80079c14(uint32 object)
@@ -1246,6 +1265,8 @@ uint32 td5_800415d0(uint32 slot, uint32 car_index)
         amplitude = 0;
     else if (amplitude >= 256)
         amplitude = 255;
+    /* Keep event pulses without the original continuous motor baseline */
+    amplitude = 0;
     offset = car_index * 4;
     divisor = r_s32(0x80088480 + offset);
     if (divisor != 0)

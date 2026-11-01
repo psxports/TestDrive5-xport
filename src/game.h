@@ -1,0 +1,50 @@
+#ifndef GAME_H
+#define GAME_H
+
+#if defined(LOCKSTEP_DEBUG)
+    #error Native refactoring requires the preserved baseline for lockstep
+#endif
+
+#include "xport.h"
+#include "psx.h"
+#include "fixed_math.h"
+#include "psx_spu.h"
+#include "asset_io.h"
+#include "scene_memory.h"
+#include "track_stream.h"
+#include "track_geometry.h"
+#include "car.h"
+#include "car_collision.h"
+#include "car_render.h"
+#include "chase.h"
+#include "hud.h"
+#include "minimap.h"
+#include "model_render.h"
+#include "sky.h"
+#include "effects.h"
+#include "display.h"
+#include "presentation_render.h"
+#include "input.h"
+#include "audio.h"
+#include "startup.h"
+#include "movies.h"
+#include "memory_card.h"
+#include "rnc.h"
+#include "texture.h"
+#include "session.h"
+#include "replay.h"
+#include "race.h"
+#include "camera.h"
+#include "records.h"
+#include "car_random.h"
+#include "results_menu.h"
+#include "records_menu.h"
+#include "track_selection.h"
+#include "race_menu.h"
+#include "credits.h"
+#include "car_selection.h"
+#include "wheels.h"
+#include "save.h"
+#include "timing.h"
+
+#endif

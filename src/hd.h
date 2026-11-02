@@ -9,6 +9,7 @@
 typedef struct HD_TRACK_IMAGE HD_TRACK_IMAGE;
 typedef struct HD_MODEL HD_PREPARED_MODEL;
 void hd_prepare_race_resources(void);
+void hd_load_race_car(uint32 slot, const uint8 *bytes, uint32 size, sint32 primary);
 void hd_prepare_sky_model(const MODEL_RESOURCE *resource, const sint8 *visibility);
 HD_PREPARED_MODEL *hd_prepare_track_model(const MODEL_RESOURCE *resource, const uint16 *pixels);
 void hd_prepare_track_texture(HD_PREPARED_MODEL *model);
@@ -36,6 +37,8 @@ typedef struct HD_TEXTURE
     uint16 flags;
 } HD_TEXTURE;
 
+void hd_race_wheel_texture(uint32 slot, uint32 frame, HD_TEXTURE *texture);
+
 enum
 {
     HD_TEXTURED = 1,
@@ -51,7 +54,8 @@ enum
     HD_LAMP_GLOW = 2048,
     HD_DISTANCE_LIT = 4096,
     HD_LENS_FLARE = 8192,
-    HD_HALF_DISTANCE_LIGHT = 16384
+    HD_HALF_DISTANCE_LIGHT = 16384,
+    HD_PRIVATE_CAR_HUB = 32768
 };
 
 typedef struct HD_UI_VERTEX

@@ -695,6 +695,8 @@ typedef struct HD_STATE
     HD_EFFECT_RETIREMENT retired_effects[HD_VIEWS][50];
 } HD_STATE;
 
+static HD_STATE hd;
+
 static HD_MODEL *model_lookup[16384];
 static sint32 original_track_suppressed;
 
@@ -707,6 +709,18 @@ static uint16 vram_snapshot[1024 * 512];
 static uint32 vram_row_versions[512];
 static VID_TARGET *preparation_target;
 static sint32 preparation_active, preparation_blends_ready;
+
+typedef struct HD_RACE_CAR
+{
+    MODEL_RESOURCE geometry;
+    const uint8 *original[2];
+    uint8 *images[2];
+    uint32 image_bytes[2];
+    HD_SOURCE_TEXTURE *textures[2];
+    HD_SOURCE_REGION regions[2];
+} HD_RACE_CAR;
+
+static HD_RACE_CAR race_cars[CAR_RACE_MODEL_COUNT];
 
 static struct
 {
@@ -727,6 +741,78 @@ static HD_MODEL *find_model(const MODEL_RESOURCE *resource, const sint8 *visibil
     return NULL;
 }
 
+static HD_RACE_CAR *race_car_resource(const MODEL_RESOURCE *resource)
+{
+    uint32 car;
+    if (resource->bytes == NULL)
+        return NULL;
+    for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
+        if (race_cars[car].geometry.bytes != NULL && (resource->bytes == race_cars[car].geometry.bytes || resource->bytes == race_cars[car].original[0] || resource->bytes == race_cars[car].original[1]))
+            return &race_cars[car];
+    return NULL;
+}
+
+static uint8 *copy_car_tim(const uint8 *bytes, uint32 size, uint32 entry, uint32 *length)
+{
+    uint32 offset, palette, image;
+    uint8 *copy;
+    XASSERT(entry <= size && size - entry >= 4);
+    memcpy(&offset, bytes + entry, 4);
+    XASSERT(offset <= size && size - offset >= 12);
+    memcpy(&palette, bytes + offset + 8, 4);
+    XASSERT(palette >= 12 && palette <= size - offset - 8 && size - offset - 8 - palette >= 4);
+    memcpy(&image, bytes + offset + 8 + palette, 4);
+    XASSERT(image >= 12 && image <= size - offset - 8 - palette);
+    *length = 8 + palette + image;
+    copy = (uint8 *)malloc(*length);
+    XASSERT(copy != NULL);
+    memcpy(copy, bytes + offset, *length);
+    return copy;
+}
+
+void hd_load_race_car(uint32 slot, const uint8 *bytes, uint32 size, sint32 primary)
+{
+    HD_RACE_CAR *car;
+    const TEXTURE_DESCRIPTOR *hub;
+    uint32 begin, end, groups, variant = session_options.model_variant;
+    if (!hd.initialized || primary)
+        return;
+    XASSERT(slot < CAR_RACE_MODEL_COUNT && size >= 12);
+    car = &race_cars[slot];
+    XASSERT(car->geometry.bytes == NULL);
+    memcpy(&begin, bytes + 4, 4);
+    memcpy(&end, bytes + 8, 4);
+    XASSERT(begin <= end && end <= size && end - begin >= sizeof(MODEL_HEADER));
+    car->geometry.capacity = end - begin;
+    car->geometry.bytes = (uint8 *)malloc(car->geometry.capacity);
+    XASSERT(car->geometry.bytes != NULL);
+    memcpy(car->geometry.bytes, bytes + begin, car->geometry.capacity);
+    groups = ((const MODEL_HEADER *)car->geometry.bytes)->stream_offset;
+    XASSERT(groups <= car->geometry.capacity && car->geometry.capacity - groups >= 4);
+    model_reset_prim_colors(car->geometry.bytes + groups);
+    car->images[0] = copy_car_tim(bytes, size, 16 + session_car_choices.cars[slot].primary_color[variant] * 4, &car->image_bytes[0]);
+    car->images[1] = copy_car_tim(bytes, size, 36 + session_car_choices.cars[slot].secondary_color[variant] * 4, &car->image_bytes[1]);
+    hub = (const TEXTURE_DESCRIPTOR *)tex_find("racehub");
+    car->regions[1].u = hub->u;
+    car->regions[1].v = hub->v;
+}
+
+void hd_race_wheel_texture(uint32 slot, uint32 frame, HD_TEXTURE *texture)
+{
+    HD_RACE_CAR *car;
+    if (!hd.race_frame || slot >= CAR_RACE_MODEL_COUNT)
+        return;
+    car = race_car_resource(&car_states[slot].render_models[0]);
+    if (car == NULL)
+        return;
+    XASSERT(car->textures[1] != NULL && frame < 4);
+    texture->page = (uint16)(car - race_cars);
+    texture->clut = 0;
+    texture->u = (uint16)(car->regions[1].u + ((frame & 1) != 0 ? 32 : 0));
+    texture->v = (uint16)(car->regions[1].v + ((frame & 2) != 0 ? 32 : 0));
+    texture->flags |= HD_PRIVATE_CAR_HUB;
+}
+
 static void unhash_model(HD_MODEL *model)
 {
     HD_MODEL **link = &model_lookup[model_bucket(model->source, model->source_size, model->visibility, model->variant)];
@@ -735,11 +821,10 @@ static void unhash_model(HD_MODEL *model)
     *link = model->hash_next;
 }
 
-static HD_STATE hd;
 sint32 game_hd_frame;
 
 static void swap_scene_buffers(HD_SCENE_BUFFERS *other);
-static void car_environment_candidate(const MODEL_RESOURCE *resource, const CAR_STATE *car);
+static void car_environment_candidate(const MODEL_RESOURCE *resource, const CAR_STATE *car, const CAR_STATE *settings);
 
 sint32 hd_capture_active(void)
 {
@@ -1844,7 +1929,14 @@ static HD_SPRITE_TEXTURE *sprite_texture_get(const HD_TEXTURE *texture)
     VID_VERTEX16 vertex = {0};
     HD_TEXTURE key = *texture;
     HD_SOURCE_REGION source_region = {0};
-    HD_SOURCE_TEXTURE *source_texture = hd_texture_source_lookup(texture->page, texture->clut, texture->u, texture->v, texture->width, texture->height, &source_region);
+    HD_SOURCE_TEXTURE *source_texture = (texture->flags & HD_PRIVATE_CAR_HUB) == 0 ? hd_texture_source_lookup(texture->page, texture->clut, texture->u, texture->v, texture->width, texture->height, &source_region) : NULL;
+    if ((texture->flags & HD_PRIVATE_CAR_HUB) != 0)
+    {
+        XASSERT(texture->page < CAR_RACE_MODEL_COUNT);
+        source_texture = race_cars[texture->page].textures[1];
+        source_region = race_cars[texture->page].regions[1];
+        XASSERT(source_texture != NULL);
+    }
     if (source_texture != NULL)
     {
         key.u = (uint16)source_region.u;
@@ -1855,7 +1947,7 @@ static HD_SPRITE_TEXTURE *sprite_texture_get(const HD_TEXTURE *texture)
     key.page &= 0x19F;
     if (((key.page >> 7) & 3) >= 2)
         key.clut = 0;
-    key.flags = (texture->flags & (HD_ZERO_OPAQUE | HD_SHADOW)) != 0 ? HD_ZERO_OPAQUE : 0;
+    key.flags = ((texture->flags & (HD_ZERO_OPAQUE | HD_SHADOW)) != 0 ? HD_ZERO_OPAQUE : 0) | (texture->flags & HD_PRIVATE_CAR_HUB);
     for (sprite = sprite_textures; sprite != NULL; sprite = sprite->next)
         if (memcmp(&sprite->key, &key, sizeof(key)) == 0)
             return sprite;
@@ -1899,8 +1991,8 @@ static VID_MATERIAL *sprite_texture_material(HD_SPRITE_TEXTURE *sprite, uint32 p
             data->params[5] = (float)image.height;
             data->cull = 0;
             data->depth_test = world;
-            data->depth_write = 0;
-            if (pass == 0)
+            data->depth_write = world && pass == 0 && (sprite->key.flags & HD_PRIVATE_CAR_HUB) != 0;
+            if (pass == 0 && (sprite->key.flags & HD_PRIVATE_CAR_HUB) == 0)
                 data->blend = VID_BLEND_ALPHA;
             vid_mat_commit(sprite->materials[world][pass]);
         }
@@ -2184,6 +2276,16 @@ void hd_reset(void)
     release_retired_models();
     hd.ui_count = 0;
     sprite_textures_free();
+    {
+        uint32 car, image;
+        for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
+        {
+            free(race_cars[car].geometry.bytes);
+            for (image = 0; image < 2; ++image)
+                free(race_cars[car].images[image]);
+        }
+        memset(race_cars, 0, sizeof(race_cars));
+    }
     hd.model_count = 0;
     hd.ui_anchor = 0;
     hd.vram_valid = 0;
@@ -2990,6 +3092,7 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
 {
     static const uint8 triangle_indices[6] = {0, 1, 2, 1, 3, 2};
     const MODEL_HEADER *header = (const MODEL_HEADER *)resource->bytes;
+    HD_RACE_CAR *private_car = race_car_resource(resource);
     uint32 offset, vertices = 0, indices = 0, faces = 0, pass;
     HD_MODEL *model = NULL;
     VID_VERTEX16 *destination = NULL;
@@ -3093,14 +3196,21 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
                         if (v > max_v)
                             max_v = v;
                     }
-                    filtered = tex_find_region((uint16)page, (uint16)clut, min_u, min_v, max_u, max_v, &region);
+                    filtered = private_car != NULL && group.kind >= 2 ? 1 : tex_find_region((uint16)page, (uint16)clut, min_u, min_v, max_u, max_v, &region);
                     if (!filtered)
                     {
                         region = (TEXTURE_REGION){min_u, min_v, max_u - min_u + 1, max_v - min_v + 1};
                         filtered = 1;
                     }
                     HD_SOURCE_REGION source_region = {0};
-                    HD_SOURCE_TEXTURE *source_texture = visibility == NULL && variant == 0 ? hd_texture_source_material((uint16)page, (uint16)clut, min_u, min_v, max_u, max_v, &source_region) : NULL;
+                    HD_SOURCE_TEXTURE *source_texture = (private_car == NULL || group.kind < 2) && visibility == NULL && variant == 0 ? hd_texture_source_material((uint16)page, (uint16)clut, min_u, min_v, max_u, max_v, &source_region) : NULL;
+                    if (private_car != NULL && group.kind >= 2)
+                    {
+                        source_region = private_car->regions[0];
+                        source_texture = variant == 0 ? private_car->textures[0] : NULL;
+                        region = (TEXTURE_REGION){(uint16)source_region.u, (uint16)source_region.v, (uint16)source_region.width, (uint16)source_region.height};
+                        XASSERT(source_region.width != 0 && source_region.height != 0 && min_u >= region.u && min_v >= region.v && max_u < region.u + region.width && max_v < region.v + region.height);
+                    }
                     HD_TEXTURE face_texture = {(uint16)page, (uint16)clut, region.u, region.v, region.width, region.height, (uint16)(HD_TEXTURED | HD_FILTERED | ((flags & 1) != 0 ? HD_RAW_TEXTURE : 0) | (blend != 0 ? HD_SEMITRANSPARENT : 0))};
                     if (visibility != NULL || model->range_count == 0 || model->ranges[model->range_count - 1].blend != blend || model->ranges[model->range_count - 1].source_texture != source_texture || memcmp(&model->ranges[model->range_count - 1].source_region, &source_region, sizeof(source_region)) != 0 || memcmp(&model->ranges[model->range_count - 1].texture, &face_texture, sizeof(face_texture)) != 0)
                     {
@@ -4013,6 +4123,9 @@ static void draw_model_snapshot(HD_MODEL *model)
 
 static const MODEL_RESOURCE *high_detail_car_resource(const MODEL_RESOURCE *resource)
 {
+    HD_RACE_CAR *private_car = race_car_resource(resource);
+    if (private_car != NULL)
+        return &private_car->geometry;
     if (hd.actor >= 0 && hd.actor < 14)
     {
         const MODEL_RESOURCE *models = car_states[hd.actor].render_models;
@@ -4041,6 +4154,12 @@ void hd_draw_model(const MODEL_RESOURCE *resource)
 {
     if (original_track_suppressed)
         return;
+    if (hd_capture_active() && hd.collecting && hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT && (uint32)hd.actor != race_view.primary_car)
+    {
+        const CAR_STATE *car = &car_states[hd.actor];
+        if ((resource->bytes == car->render_models[0].bytes || resource->bytes == car->render_models[1].bytes) && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
+            car_environment_candidate(high_detail_car_resource(resource), car, &car_states[race_view.primary_car]);
+    }
     draw_model(resource, NULL);
 }
 
@@ -4351,8 +4470,8 @@ void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *resource, HD_CAR_F
             memcpy(hd.ambient, field.ambient, sizeof(hd.ambient));
             hd.light_override = &field;
         }
-        if (family == HD_CAR_PRIMARY && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
-            car_environment_candidate(resource, car);
+        if (family != HD_CAR_TRAFFIC && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
+            car_environment_candidate(resource, car, family == HD_CAR_PRIMARY ? car : &car_states[race_view.primary_car]);
         draw_model(resource, NULL);
         if (family == HD_CAR_RACING || (family == HD_CAR_SPLIT && race_session.multiplayer_mode == 3 && slot != chase_state.pursuer_slot))
             chase_draw_hd_health(slot);
@@ -4591,15 +4710,16 @@ void hd_environment_surface(const MODEL_RESOURCE *resource, float angle, float o
     capture_environment(draw, sample, period_u == 128 ? 1 : period_u == 64 ? 2 : 3);
 }
 
-static void car_environment_candidate(const MODEL_RESOURCE *resource, const CAR_STATE *car)
+static void car_environment_candidate(const MODEL_RESOURCE *resource, const CAR_STATE *car, const CAR_STATE *settings)
 {
     const CVECTOR *previous = hd.environment_tint_override;
-    CVECTOR tint = {(uint8)car->environment.level, (uint8)car->environment.level, (uint8)car->environment.level, 0};
+    uint32 type = settings->environment.type;
+    CVECTOR tint = {(uint8)settings->environment.level, (uint8)settings->environment.level, (uint8)settings->environment.level, 0};
     hd.environment_tint_override = &tint;
-    if (car->environment.type == 0)
+    if (type == 0)
         hd_environment_reflection(resource, &car_environment_render.mapping, 1);
     else
-        hd_environment_surface(resource, car->environment.type == 2 ? -car->orientation.y / 256.0f * RAD12 : 0.0f, car->environment.type == 1 ? 512.0f : car->environment.type == 2 ? car->pos.x / 8192.0f : 0.0f, car->environment.type == 1 ? (sint32)car_environment_render.reflection_phase / 256.0f : car->environment.type == 2 ? car->pos.z / 8192.0f : 0.0f, car->environment.type == 1 ? 128 : car->environment.type == 2 ? 64 : 0, car->environment.type == 1 || car->environment.type == 2 ? 64 : 0);
+        hd_environment_surface(resource, type == 2 ? -car->orientation.y / 256.0f * RAD12 : 0.0f, type == 1 ? 512.0f : type == 2 ? car->pos.x / 8192.0f : 0.0f, type == 1 ? (sint32)car_environment_render.reflection_phase / 256.0f : type == 2 ? car->pos.z / 8192.0f : 0.0f, type == 1 ? 128 : type == 2 ? 64 : 0, type == 1 || type == 2 ? 64 : 0);
     hd.environment_tint_override = previous;
 }
 
@@ -4618,8 +4738,13 @@ void hd_world_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGB
     VID_VERTEX2D *vertices;
     uint32 vertex, source;
     sint32 actor;
+    HD_SPRITE_TEXTURE *sprite;
+    HD_SOURCE_GPU image = {0};
     if (!hd_capture_active() || !hd.collecting)
         return;
+    sprite = (texture->flags & HD_PRIVATE_CAR_HUB) != 0 ? sprite_texture_get(texture) : NULL;
+    if (sprite != NULL)
+        image = hd_texture_source_gpu(sprite->source_texture);
     while (*cursor != NULL && (*cursor)->used + 6 > HD_UI_MESH_VERTICES)
         cursor = &(*cursor)->next;
     mesh = *cursor;
@@ -4664,6 +4789,17 @@ void hd_world_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGB
         vertices[vertex].tex[3] = texture->u | (texture->v << 8);
         vertices[vertex].rect[0] = texture->width;
         vertices[vertex].rect[1] = texture->height;
+        if (sprite != NULL)
+        {
+            vertices[vertex].uv[0] += (texture->u - sprite->source_region.u) * 2.0f;
+            vertices[vertex].uv[1] += (texture->v - sprite->source_region.v) * 2.0f;
+            vertices[vertex].tex[0] = (uint16)image.opaque_layer;
+            vertices[vertex].tex[1] = (uint16)image.stp_layer;
+            vertices[vertex].tex[2] |= 1024;
+            vertices[vertex].tex[3] = (uint16)image.mode;
+            vertices[vertex].rect[0] = (uint16)image.width;
+            vertices[vertex].rect[1] = (uint16)image.height;
+        }
     }
     actor = hd.actor;
     if (!view_space)
@@ -4683,6 +4819,8 @@ void hd_world_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGB
     draw->count = 6;
     draw->blend = (texture->flags & HD_SEMITRANSPARENT) != 0 ? 1 + ((texture->page >> 5) & 3) : 0;
     draw->dynamic = 1;
+    if (sprite != NULL)
+        draw->quad_texture = *texture;
     mesh->used += 6;
 }
 
@@ -5876,6 +6014,16 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
             }
         return;
     }
+    if (draw->dynamic == 2 && (draw->quad_texture.flags & HD_PRIVATE_CAR_HUB) != 0)
+    {
+        if (phase == 0 || (phase == 2 && draw->blend != 0))
+        {
+            HD_SPRITE_TEXTURE *sprite = sprite_texture_get(&draw->quad_texture);
+            vid_pass(sprite_texture_material(sprite, phase == 0 ? 0 : draw->blend, 1));
+            vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
+        }
+        return;
+    }
     if (draw->dynamic == 2 && draw->model->texture_asset != NULL)
     {
         uint32 pass = phase == 2 ? draw->blend : 0;
@@ -6993,7 +7141,7 @@ void hd_prepare_draw_capacity(uint32 count)
 void hd_prepare_race_resources(void)
 {
     float uniforms[30][4] = {{0}};
-    uint32 car, lod, variant;
+    uint32 car, variant;
     VID_SAMPLE *completion;
     if (!hd.initialized)
         return;
@@ -7019,6 +7167,25 @@ void hd_prepare_race_resources(void)
     }
     hd_track_prepare();
     hd_texture_sources_native(VRAM);
+    for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
+    {
+        HD_RACE_CAR *asset = &race_cars[car];
+        uint32 image;
+        if (asset->geometry.bytes == NULL)
+            continue;
+        asset->original[0] = car_states[car].render_models[0].bytes;
+        asset->original[1] = car_states[car].render_models[1].bytes;
+        for (image = 0; image < 2; ++image)
+        {
+            HD_SOURCE_PIXELS pixels;
+            asset->textures[image] = hd_texture_source_tim(asset->images[image], asset->image_bytes[image]);
+            pixels = hd_texture_source_pixels(asset->textures[image]);
+            asset->regions[image].width = pixels.width;
+            asset->regions[image].height = pixels.height;
+            free(asset->images[image]);
+            asset->images[image] = NULL;
+        }
+    }
     {
         uint32 table, offset;
         memcpy(&table, scene_track_image.bytes + 8, sizeof(table));
@@ -7033,15 +7200,14 @@ void hd_prepare_race_resources(void)
         }
     }
     for (car = 0; car < race_control.car_count; ++car)
-        for (lod = 0; lod < 2; ++lod)
-        {
-            MODEL_RESOURCE *resource = &car_states[car].render_models[lod];
-            if (resource->bytes == NULL || resource->capacity < sizeof(MODEL_HEADER) || memcmp(resource->bytes, "\0PSMODL", 8) != 0)
-                continue;
-            for (variant = 0; variant < 3; ++variant)
-                if (find_model(resource, NULL, variant) == NULL)
-                    create_model(resource, NULL, variant);
-        }
+    {
+        const MODEL_RESOURCE *resource = high_detail_car_resource(&car_states[car].render_models[0]);
+        if (resource->bytes == NULL || resource->capacity < sizeof(MODEL_HEADER) || memcmp(resource->bytes, "\0PSMODL", 8) != 0)
+            continue;
+        for (variant = 0; variant < 3; ++variant)
+            if (find_model(resource, NULL, variant) == NULL)
+                create_model(resource, NULL, variant);
+    }
     hd_texture_sources_seal();
     hd_texture_sources_build_gpu();
     {
@@ -7085,14 +7251,13 @@ void hd_prepare_race_resources(void)
     }
     sky_prepare_hd();
     for (car = 0; car < race_control.car_count; ++car)
-        for (lod = 0; lod < 2; ++lod)
-        {
-            MODEL_RESOURCE *resource = &car_states[car].render_models[lod];
-            if (resource->bytes == NULL || resource->capacity < sizeof(MODEL_HEADER) || memcmp(resource->bytes, "\0PSMODL", 8) != 0)
-                continue;
-            for (variant = 0; variant < 3; ++variant)
-                hd_prepare_model(resource, NULL, variant);
-        }
+    {
+        const MODEL_RESOURCE *resource = high_detail_car_resource(&car_states[car].render_models[0]);
+        if (resource->bytes == NULL || resource->capacity < sizeof(MODEL_HEADER) || memcmp(resource->bytes, "\0PSMODL", 8) != 0)
+            continue;
+        for (variant = 0; variant < 3; ++variant)
+            hd_prepare_model(resource, NULL, variant);
+    }
     if (preparation_active)
     {
         HD_MODEL *model;
@@ -7151,6 +7316,21 @@ void hd_prepare_race_resources(void)
                     }
             }
         }
+
+        for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
+            if (race_cars[car].geometry.bytes != NULL)
+            {
+                const HD_SOURCE_REGION *region = &race_cars[car].regions[1];
+                HD_TEXTURE texture = {(uint16)car, 0, (uint16)region->u, (uint16)region->v, (uint16)region->width, (uint16)region->height, HD_TEXTURED | HD_FILTERED | HD_PRIVATE_CAR_HUB};
+                HD_SPRITE_TEXTURE *sprite = sprite_texture_get(&texture);
+                uint32 pass;
+                vid_uniforms(&uniforms[0][0], 30);
+                for (pass = 0; pass < HD_BLEND_PASSES; ++pass)
+                {
+                    vid_pass(sprite_texture_material(sprite, pass, 1));
+                    vid_submit(sprite_geometry, NULL, 0, 3);
+                }
+            }
 
         for (view = 0; view < HD_VIEWS; ++view)
         {

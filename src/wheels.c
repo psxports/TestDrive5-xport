@@ -49,6 +49,7 @@ static void draw_hd_wheel(uint32 slot, uint32 wheel, const SVECTOR *center, floa
     uint32 face, point, segment;
     if (!hd_capture_active())
         return;
+    hd_race_wheel_texture(slot, (uint32)(tex - wheel_tex) & 3, &texture);
     hd_wheel_begin(wheel, center, steering, spin, spin_period);
     IdentityMatrixf(&turn);
     RotMatrixYf(steering, &turn);

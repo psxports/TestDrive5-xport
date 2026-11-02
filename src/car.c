@@ -1658,6 +1658,7 @@ void car_load_race_models(void)
         work_size = rnc_allocation_size(compressed_bytes) - 1024;
         XASSERT(!(work_size < 88 || work_size > sizeof(race_model_workspace)));
         rnc_decode(compressed_bytes, compressed_size, work_bytes, 0x32000);
+        hd_load_race_car(slot, work_bytes, work_size, primary);
         memcpy(&val, work_bytes, sizeof(val));
         idx = 1;
         if (val != 0)

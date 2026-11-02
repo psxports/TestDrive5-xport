@@ -363,11 +363,79 @@ HD_SOURCE_TEXTURE *hd_texture_source_lookup(uint16 page, uint16 clut, uint32 u, 
     return best->texture;
 }
 
+static HD_SOURCE_TEXTURE *source_pixels(uint16 *colors, uint32 width, uint32 height)
+{
+    HD_SOURCE_TEXTURE *texture;
+    uint32 pixel, classes = 0, hash = 2166136261u, bytes = width * height * 2;
+    XASSERT(source_cache.banks == NULL);
+    for (pixel = 0; pixel < width * height; ++pixel)
+        classes |= colors[pixel] == 0 ? 1u : (colors[pixel] & 32768) != 0 ? 4u : 2u;
+    hash = (hash ^ width) * 16777619u;
+    hash = (hash ^ height) * 16777619u;
+    for (pixel = 0; pixel < bytes; ++pixel)
+        hash = (hash ^ ((uint8 *)colors)[pixel]) * 16777619u;
+    for (texture = source_cache.textures[hash & 1023]; texture != NULL; texture = texture->next)
+        if (texture->assigned == NULL && texture->hash == hash && texture->width == width && texture->height == height && memcmp(texture->colors, colors, bytes) == 0)
+            break;
+    if (texture != NULL)
+        free(colors);
+    else
+    {
+        texture = (HD_SOURCE_TEXTURE *)calloc(1, sizeof(*texture));
+        XASSERT(texture != NULL);
+        texture->width = width;
+        texture->height = height;
+        texture->classes = classes;
+        texture->hash = hash;
+        texture->colors = colors;
+        texture->next = source_cache.textures[hash & 1023];
+        source_cache.textures[hash & 1023] = texture;
+        ++source_cache.decoded_images;
+        source_cache.decoded_bytes += bytes;
+    }
+    return texture;
+}
+
+HD_SOURCE_TEXTURE *hd_texture_source_tim(const uint8 *image, uint32 bytes)
+{
+    uint32 magic, flags, palette_bytes, image_bytes, offset, width, height, x, y;
+    uint16 words, rows, color;
+    uint16 *colors;
+    const uint8 *palette, *pixels;
+    XASSERT(image != NULL && bytes >= 20);
+    memcpy(&magic, image, 4);
+    memcpy(&flags, image + 4, 4);
+    memcpy(&palette_bytes, image + 8, 4);
+    XASSERT(magic == 16 && (flags == 8 || flags == 9));
+    XASSERT(palette_bytes >= 12 + (flags == 8 ? 32u : 512u) && palette_bytes <= bytes - 8);
+    palette = image + 20;
+    offset = 8 + palette_bytes;
+    XASSERT(offset <= bytes && bytes - offset >= 12);
+    memcpy(&image_bytes, image + offset, 4);
+    memcpy(&words, image + offset + 8, 2);
+    memcpy(&rows, image + offset + 10, 2);
+    width = (uint32)words * (flags == 8 ? 4 : 2);
+    height = rows;
+    XASSERT(width != 0 && width <= 256 && height != 0 && height <= 256);
+    XASSERT(image_bytes >= 12 && image_bytes <= bytes - offset && (uint32)words * height * 2 <= image_bytes - 12);
+    pixels = image + offset + 12;
+    colors = (uint16 *)malloc(width * height * sizeof(*colors));
+    XASSERT(colors != NULL);
+    for (y = 0; y < height; ++y)
+        for (x = 0; x < width; ++x)
+        {
+            uint32 index = flags == 8 ? (pixels[y * words * 2 + x / 2] >> ((x & 1) * 4)) & 15 : pixels[y * words * 2 + x];
+            memcpy(&color, palette + index * 2, 2);
+            colors[y * width + x] = color;
+        }
+    return source_pixels(colors, width, height);
+}
+
 HD_SOURCE_TEXTURE *hd_texture_source_named(uint16 page, uint16 clut, uint32 u, uint32 v, uint32 width, uint32 height, const uint16 *vram)
 {
     HD_SOURCE_NAMED *named;
     HD_SOURCE_TEXTURE *texture;
-    uint32 x, y, classes = 0, hash = 2166136261u, bytes = width * height * 2;
+    uint32 x, y, bytes = width * height * 2;
     uint32 depth = (page >> 7) & 3, shift = depth == 0 ? 2 : depth == 1 ? 1 : 0;
     uint16 *colors;
     XASSERT(source_cache.banks == NULL && vram != NULL && width != 0 && height != 0);
@@ -390,31 +458,8 @@ HD_SOURCE_TEXTURE *hd_texture_source_named(uint16 page, uint16 clut, uint32 u, u
                 word = vram[((clut >> 6) & 511) * 1024 + (((clut & 63) * 16 + palette) & 1023)];
             }
             colors[y * width + x] = word;
-            classes |= word == 0 ? 1u : (word & 32768) != 0 ? 4u : 2u;
         }
-    hash = (hash ^ width) * 16777619u;
-    hash = (hash ^ height) * 16777619u;
-    for (x = 0; x < bytes; ++x)
-        hash = (hash ^ ((uint8 *)colors)[x]) * 16777619u;
-    for (texture = source_cache.textures[hash & 1023]; texture != NULL; texture = texture->next)
-        if (texture->assigned == NULL && texture->hash == hash && texture->width == width && texture->height == height && memcmp(texture->colors, colors, bytes) == 0)
-            break;
-    if (texture != NULL)
-        free(colors);
-    else
-    {
-        texture = (HD_SOURCE_TEXTURE *)calloc(1, sizeof(*texture));
-        XASSERT(texture != NULL);
-        texture->width = width;
-        texture->height = height;
-        texture->classes = classes;
-        texture->hash = hash;
-        texture->colors = colors;
-        texture->next = source_cache.textures[hash & 1023];
-        source_cache.textures[hash & 1023] = texture;
-        ++source_cache.decoded_images;
-        source_cache.decoded_bytes += bytes;
-    }
+    texture = source_pixels(colors, width, height);
     named = (HD_SOURCE_NAMED *)calloc(1, sizeof(*named));
     XASSERT(named != NULL);
     *named = (HD_SOURCE_NAMED){source_cache.named, page, clut, u, v, width, height, texture};

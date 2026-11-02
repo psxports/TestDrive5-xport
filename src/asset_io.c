@@ -54,6 +54,21 @@ static void named_data_path(char *path, const char *name)
     path[idx] = 0;
 }
 
+static struct
+{
+    uint8 *bytes;
+    uint32 size;
+} stream_cache[2];
+
+static uint64 stream_cache_hits, stream_file_reads;
+
+static void clear_stream_cache(uint32 slot)
+{
+    free(stream_cache[slot].bytes);
+    stream_cache[slot].bytes = NULL;
+    stream_cache[slot].size = 0;
+}
+
 static uint32 open_asset(const char *path, FILE **file)
 {
     long len;
@@ -74,6 +89,12 @@ static uint32 asset_file_size(const char *filename)
     uint32 bytes;
 
     named_data_path(path, filename);
+    {
+        uint32 slot;
+        for (slot = 0; slot < 2; ++slot)
+            if (stream_cache[slot].bytes != NULL && strcmp(path, asset_stream.paths[slot]) == 0)
+                return stream_cache[slot].size;
+    }
     bytes = open_asset(path, &file);
     fclose(file);
     return bytes;
@@ -87,6 +108,17 @@ static uint32 asset_read_file(const char *filename, void *dst, uint32 capacity)
     size_t count;
 
     named_data_path(path, filename);
+    {
+        uint32 slot;
+        for (slot = 0; slot < 2; ++slot)
+            if (stream_cache[slot].bytes != NULL && strcmp(path, asset_stream.paths[slot]) == 0)
+            {
+                XASSERT(stream_cache[slot].size <= capacity);
+                memcpy(dst, stream_cache[slot].bytes, stream_cache[slot].size);
+                ++stream_cache_hits;
+                return stream_cache[slot].size;
+            }
+    }
     bytes = open_asset(path, &file);
     XASSERT(!(bytes > capacity));
     count = xport_fread(dst, 1, bytes, file);
@@ -98,7 +130,26 @@ static uint32 asset_read_file(const char *filename, void *dst, uint32 capacity)
 static void asset_bind_stream(uint32 slot, const char *filename)
 {
     XASSERT(!(slot >= 2));
+    clear_stream_cache(slot);
     named_data_path(asset_stream.paths[slot], filename);
+}
+
+void asset_prepare_stream_cache(uint32 slot)
+{
+    FILE *file;
+    uint32 size;
+    size_t read;
+    XASSERT(slot < 2);
+    if (!asset_use_extracted_files() || asset_stream.paths[slot][0] == 0 || stream_cache[slot].bytes != NULL)
+        return;
+    size = open_asset(asset_stream.paths[slot], &file);
+    stream_cache[slot].bytes = (uint8 *)malloc(size != 0 ? size : 1);
+    XASSERT(stream_cache[slot].bytes != NULL);
+    read = xport_fread(stream_cache[slot].bytes, 1, size, file);
+    fclose(file);
+    XASSERT(read == size);
+    stream_cache[slot].size = size;
+    ++stream_file_reads;
 }
 
 static void read_data_range(const char *path, uint32 offset, uint32 bytes, void *dst)
@@ -125,6 +176,18 @@ static void read_data_range(const char *path, uint32 offset, uint32 bytes, void 
 static void asset_read_stream(uint32 slot, uint32 offset, uint32 bytes, void *dst)
 {
     XASSERT(!(slot >= 2 || asset_stream.paths[slot][0] == 0));
+    {
+        uint32 cached;
+        for (cached = 0; cached < 2; ++cached)
+            if (stream_cache[cached].bytes != NULL && strcmp(asset_stream.paths[cached], asset_stream.paths[slot]) == 0)
+            {
+                XASSERT(offset <= stream_cache[cached].size && bytes <= stream_cache[cached].size - offset);
+                memcpy(dst, stream_cache[cached].bytes + offset, bytes);
+                ++stream_cache_hits;
+                return;
+            }
+    }
+    ++stream_file_reads;
     read_data_range(asset_stream.paths[slot], offset, bytes, dst);
 }
 
@@ -433,7 +496,10 @@ STREAM_REQUEST *stream_init(uint32 reset_mode)
     CdInit();
     CdSetDebug(0);
     for (idx = 0; idx < 2; ++idx)
+    {
+        clear_stream_cache(idx);
         asset_stream.requests[idx] = empty;
+    }
     asset_stream.completion_mask = 0;
     asset_stream.cur_slot = 0;
     asset_stream.retries = 0;

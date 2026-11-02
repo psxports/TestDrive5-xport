@@ -58,7 +58,7 @@ void recs_menu_begin(void)
     for (idx = 0; idx < 24; ++idx)
     {
         entry = (sint16)session_circuit_tracks[idx];
-        if (progression_profile.track_availability[(uint32)entry] == 2)
+        if (session_track_availability((uint32)entry) == 2)
         {
             recs_menu.groups[count] = (uint8)((uint32)entry - 1);
             item = recs_menu.count;
@@ -69,7 +69,7 @@ void recs_menu_begin(void)
     for (idx = 0; idx < 7; ++idx)
     {
         entry = (sint16)session_linear_tracks[idx];
-        if (progression_profile.track_availability[(uint32)entry] == 2)
+        if (session_track_availability((uint32)entry) == 2)
         {
             recs_menu.groups[count] = (uint8)((uint32)entry - 1);
             item = recs_menu.count;
@@ -93,6 +93,7 @@ void recs_menu_begin(void)
         collect_rec_candidates();
         recs_set_candidate_names();
         recs_sort();
+        save_autosave();
         presentation_items[2].active = (0);
         presentation_items[3].active = (0);
     }

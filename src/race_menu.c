@@ -290,8 +290,8 @@ setup:
     XASSERT(!(val > presentation_model_image.size || presentation_model_image.size - val < 4));
     tex_set_table(model_file + val, presentation_model_image.size - val);
     tex = tex_find("Hicar");
-    xport_store_le16(tex + 8, (uint16)(152));
-    xport_store_le16(tex + 10, (uint16)(48));
+    (((TEXTURE_DESCRIPTOR *)tex)->page = 152);
+    (((TEXTURE_DESCRIPTOR *)tex)->clut = 48);
     presentation_init_packets();
     presentation_upload_background();
     val = disp_state.bank;
@@ -876,9 +876,8 @@ static void update_race_menu(void)
 
 sint32 race_menu_run(void)
 {
-    uint32 val, tick, buttons, buffer;
-    const uint8 *image;
-    PSX_RECT rect;
+    uint32 val, buttons;
+    DISPLAY_CLOCK clock;
     sint32 offset, random;
 
     FUNCTION_MARKER(0x80057B30, "SLUS_006.10");
@@ -888,13 +887,20 @@ sint32 race_menu_run(void)
         presentation_items[offset].active = (0);
     random = randPSX();
     audio_play_xa(random % 8);
-    tick = (uint32)VSync(-1);
+    disp_clock_init(&clock, 1, session_flow.menu_state);
     if (race_session.demo == 0)
+    {
         collect_unlocks();
+        save_autosave();
+    }
     while ((sint16)race_control.results_finished == 0)
     {
+        if (!disp_clock_step(&clock, session_flow.menu_state))
+            continue;
+        hd_begin_frame(1);
         input_poll();
         disp_swap();
+        hd_menu_view();
         disp_clear_ordering_table();
         model_set_view_pos(&presentation_menu_view_pos);
         model_set_view_angles(&presentation_menu_view_angles);
@@ -910,29 +916,17 @@ sint32 race_menu_run(void)
         disp_state.post_sync_ticks = val;
         /* The button hook 13CF8 has no observable body */
         (void)buttons;
-        do
-        {
-            val = (uint32)VSync(-1) - tick;
-        } while ((sint32)val <= 0);
-        tick = (uint32)VSync(-1);
         timing_reset_counter(1);
         disp_apply();
-        if (race_menu.state == 11)
-            presentation_upload_car_background();
-        else
-        {
-            image = (const uint8 *)presentation_background.image;
-            buffer = disp_state.bank;
-            rect.h = 256;
-            rect.w = 512;
-            rect.x = 0;
-            rect.y = (sint16)(buffer << 8);
-            LoadImagePSX(&rect, (uint32 *)(image + 20));
-        }
+        presentation_upload_background();
         val = race_control.frame_counter;
         race_control.frame_counter = (uint32)(val + 1);
+        hd_menu_background(disp_state.bank, 256);
         disp_draw_ordering_table();
+        hd_end_frame();
     }
+    hd_present_frame(clock.field, clock.fields);
+    hd_suspend();
     audio_stop_xa();
     return audio_play_request(13, 20, (sint32)audio_options.music_volume, 0, 5120);
 }

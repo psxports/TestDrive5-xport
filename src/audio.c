@@ -720,29 +720,18 @@ uint32 audio_set_car_engine_gain(sint32 amount, uint32 slot)
     return result;
 }
 
-void audio_fade(void)
+void audio_fade(uint32 volume)
 {
-    uint32 initial;
-    uint32 cur;
-    uint32 volume;
+    uint32 initial = audio_options.music_volume;
 
     FUNCTION_MARKER(0x80054108, "SLUS_006.10");
-    initial = audio_options.music_volume;
-    cur = initial;
-    while ((sint32)cur >= 0)
-    {
-        audio_options.music_volume = (cur - 64);
-        audio_update_cd_volume();
-        volume = audio_options.music_volume << 2;
-        audio_voices[20].attr.volume.left = (sint16)((uint16)volume);
-        audio_voices[20].attr.volume.right = (sint16)((uint16)volume);
-        SpuSetVoiceAttr(&audio_voices[20].attr);
-        VSync(0);
-        cur = audio_options.music_volume;
-    }
-    audio_stop_xa();
-    audio_stop_voice(20);
-    audio_options.music_volume = (initial);
+    audio_options.music_volume = volume;
+    audio_update_cd_volume();
+    volume <<= 2;
+    audio_voices[20].attr.volume.left = (sint16)volume;
+    audio_voices[20].attr.volume.right = (sint16)volume;
+    SpuSetVoiceAttr(&audio_voices[20].attr);
+    audio_options.music_volume = initial;
 }
 
 sint32 audio_update_cd_volume(void)
@@ -846,6 +835,10 @@ sint32 audio_play_xa(sint32 track)
 
 sint32 audio_poll_xa(void)
 {
+#if AP_WEB
+    // the file player owns stream position and looping
+    return 0;
+#else
     uint32 counter;
     uint8 response[8];
     CdlLOC pos = {0};
@@ -888,6 +881,7 @@ sint32 audio_poll_xa(void)
     begin = (sint32)audio_xa.begin;
     CdIntToPos(begin, &seek_pos);
     return CdControlF(0x1B, (uint8 *)&seek_pos);
+#endif
 }
 
 uint32 audio_replay_xa_track(sint32 track)

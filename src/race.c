@@ -270,6 +270,7 @@ static uint32 draw_pause_background(void)
             head_address.tags = cur_frame->ordering;
             head_address.byte_offset = (uint32)(800);
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
+            hd_ui_gradient(poly->p, 200);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
             ++poly;
         }
@@ -391,6 +392,7 @@ static uint32 draw_pause_menu(uint32 player)
             head_address.tags = cur_frame->ordering;
             head_address.byte_offset = (uint32)(8);
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
+            hd_ui_gradient(poly->p, 2);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
             val = idx == 1 ? audio_options.effects_volume : audio_options.music_volume;
             volume = (4096 - val);
@@ -430,6 +432,7 @@ static uint32 draw_pause_menu(uint32 player)
             head_address.byte_offset = 0;
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
             half_width += 20;
+            hd_ui_gradient(poly->p, 0);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
         }
         if (idx == 4 && race_control.pause_camera_mode == 0)
@@ -494,7 +497,7 @@ static uint32 draw_pause_menu(uint32 player)
     return result;
 }
 
-static uint32 update_pause(void)
+static uint32 update_pause(uint64 *previous_field)
 {
     uint32 result;
     uint32 player;
@@ -506,6 +509,7 @@ static uint32 update_pause(void)
 
     uint32 restore;
     PSX_RECT rect;
+    DISPLAY_CLOCK pause_clock;
 
     FUNCTION_MARKER(0x8005A3D0, "SLUS_006.10");
     result = session_flow.attract_active;
@@ -533,6 +537,7 @@ static uint32 update_pause(void)
     result = allocate_pause_resources();
     if (result == 1)
         return result;
+    hd_pause_begin();
     restore = race_view.split_mode;
     race_control.pause_confirmation = (uint32)(0);
     race_control.pause_camera_mode = (uint32)(restore);
@@ -546,12 +551,7 @@ static uint32 update_pause(void)
     rect.y = (sint16)((flip ^ 1) << 8);
     MoveImage(&rect, 0, (sint32)(flip << 8));
     audio_mute_voices();
-#if AP_WEB
     audio_pause_xa();
-#else
-    if (race_session.linear_course != 0)
-        audio_pause_xa();
-#endif
     flip = disp_state.pal;
     width = model_render.width;
     height = model_render.height;
@@ -569,10 +569,15 @@ static uint32 update_pause(void)
     if (race_control.paused == 1)
     {
         pad = &input_ports[player].pressed;
+        disp_clock_init(&pause_clock, 2, 0);
         do
         {
+            if (!disp_clock_step(&pause_clock, 0))
+                continue;
+            hd_begin_frame(1);
             input_poll();
             disp_swap();
+            hd_menu_view();
             disp_clear_ordering_table();
             draw_pause_background();
             hud_reset_race_text();
@@ -620,23 +625,19 @@ static uint32 update_pause(void)
             hud_link_race_text(result);
             if (race_session.two_players == 0 && race_session.linear_course == 0)
                 stream_update();
-            VSync(2);
             disp_apply();
             restore_pause_background();
             disp_draw_ordering_table();
+            hd_end_frame();
             if ((*pad & 8) != 0)
                 race_control.paused = (uint32)(0);
         } while (race_control.paused == 1);
     }
-    VSync(0);
+    hd_pause_end();
+    *previous_field = xport_frame();
     DrawSync(0);
     audio_restore_voices();
-#if AP_WEB
     audio_resume_xa();
-#else
-    if (race_session.linear_course != 0)
-        audio_resume_xa();
-#endif
     restore = race_control.pause_camera_mode;
     result = race_session.two_players;
     input_ports[0].pressed = (0);
@@ -983,7 +984,7 @@ uint32 race_run_single(void)
     uint32 val;
 
     uint32 result;
-    uint32 prev_sync;
+    DISPLAY_CLOCK clock;
     uint32 frames = 0;
     uint32 absent_frames = 0;
     uint32 elapsed = 0;
@@ -1011,7 +1012,7 @@ uint32 race_run_single(void)
     audio_set_listener_pos(&car_states[(val * 864) / 864u].pos);
     val = race_view.tracked_car;
     audio_set_listener_velocity(&car_states[(val * 864) / 864u].velocity);
-    prev_sync = (uint32)VSync(-1);
+    disp_clock_init(&clock, 2, 0);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
     if ((level_header[30] & 1) != 0)
@@ -1032,6 +1033,9 @@ uint32 race_run_single(void)
     race_view.viewport_y = (uint32)(0);
     while (race_control.stop_requested == 0)
     {
+        if (!disp_clock_step(&clock, 0))
+            continue;
+        hd_begin_race_frame(1);
         if (session_flow.attract_active != 0)
             race_control.stopped_players = (uint32)(3);
         race_view.active_car = (uint32)(0);
@@ -1062,7 +1066,9 @@ uint32 race_run_single(void)
                 }
             }
         }
+        hd_capture_pause(elapsed >= 8 && (race_control.pause_request_player != 0 || (input_ports[0].pressed & 8) != 0));
         disp_swap();
+        hd_race_view(0, &disp_state.cur->draw);
         disp_clear_ordering_table();
         model_packet_pool_reset();
         level_desc = &scene_level_image.desc;
@@ -1097,6 +1103,7 @@ uint32 race_run_single(void)
         update_pos();
         val = race_view.tracked_car;
         camera_update(&car_states[val], 0);
+        hd_capture_race_poses();
         val = race_view.tracked_car;
         hud_draw_full_view(&car_states[val]);
         input_update_rumble(0, 0);
@@ -1147,25 +1154,20 @@ uint32 race_run_single(void)
         if (race_session.linear_course == 0)
             track_stream_upload_images();
         stream_update();
-        if (race_view.primary_car == 0 || primary_view_gate == 0)
-        {
-            while ((sint32)((uint32)VSync(-1) - prev_sync) < 2)
-            {
-            }
-            prev_sync = (uint32)VSync(-1);
-        }
         timing_reset_counter(1);
-        if (race_session.linear_course != 0)
-            audio_poll_xa();
+        audio_poll_xa();
         disp_apply();
+        hd_native_begin(0, &disp_state.cur->draw);
         disp_draw_ordering_table();
+        hd_native_end(0);
         ++frames;
         if ((sint32)elapsed <= 65534)
             ++elapsed;
         if ((sint32)elapsed >= 9)
-            update_pause();
+            update_pause(&clock.field);
         if (elapsed == 2)
             audio_prepare_race_voices();
+        hd_end_frame();
     }
     DrawSync(0);
     VSync(0);
@@ -1186,6 +1188,7 @@ uint32 race_run_single(void)
             }
         }
     }
+    hd_suspend();
     return result;
 }
 
@@ -1195,7 +1198,8 @@ void race_run_two_player(void)
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint32 absent_frames[2];
-    uint32 val, mode, buffer, prev_sync, elapsed = 0;
+    uint32 val, mode, buffer, elapsed = 0;
+    DISPLAY_CLOCK clock;
     uint32 idx, slot, frame_counter, update_cycles, count;
     CAR_STATE *car;
     uint8 color[4];
@@ -1222,7 +1226,7 @@ void race_run_two_player(void)
     buffer = disp_state.bank;
     race_control.stream_wait_marker = 0xFFFFFFFF;
     race_control.timing_hold = 1;
-    prev_sync = (uint32)VSync(-1);
+    disp_clock_init(&clock, 2, 0);
     race_control.exit_reason = (uint32)(0);
     race_view.tracked_car = (uint32)(0);
     race_control.stop_requested = (uint32)(0);
@@ -1250,6 +1254,9 @@ void race_run_two_player(void)
     }
     while (race_control.stop_requested == 0)
     {
+        if (!disp_clock_step(&clock, 0))
+            continue;
+        hd_begin_race_frame(2);
         input_poll();
         race_view.active_car = (uint32)(0);
         input_pack_controls(0);
@@ -1270,6 +1277,7 @@ void race_run_two_player(void)
             else
                 absent_frames[idx] = 0;
         }
+        hd_capture_pause(elapsed >= 8 && (race_control.pause_request_player != 0 || (input_ports[0].pressed & 8) != 0 || (input_ports[1].pressed & 8) != 0));
         session_update_catchup();
         val = race_control.stopped_players;
         race_view.active_car = (uint32)(0);
@@ -1311,6 +1319,7 @@ void race_run_two_player(void)
         race_view.active_car = (uint32)(0);
         select_primary_view(buffer);
         disp_swap();
+        hd_race_view(0, &disp_state.frames[buffer].draw);
         disp_clear_ordering_table();
         model_packet_pool_reset();
         slot = race_view.active_car;
@@ -1318,6 +1327,7 @@ void race_run_two_player(void)
         model_update_lod_distances(pos, 1500, 3000);
         slot = race_view.active_car;
         camera_update(&car_states[slot], slot);
+        hd_capture_race_poses();
         hud_update_countdown();
         sky_draw((sint32)race_view.active_car);
         effect_draw_wheel_skids();
@@ -1343,10 +1353,6 @@ void race_run_two_player(void)
         val = (uint32)timing_read_counter(1, 0);
         disp_state.post_sync_ticks = val;
         disp_state.pre_sync_ticks = val;
-        while ((sint32)((uint32)VSync(-1) - prev_sync) < 2)
-        {
-        }
-        prev_sync = (uint32)VSync(-1);
         timing_reset_counter(1);
         frame_counter = race_control.frame_counter;
         update_cycles = race_control.update_cycles;
@@ -1354,7 +1360,9 @@ void race_run_two_player(void)
         race_control.update_cycles = update_cycles + 1;
         DrawSync(0);
         disp_apply_frame(buffer);
+        hd_native_begin(0, &disp_state.frames[buffer].draw);
         disp_draw_ordering_table();
+        hd_native_end(0);
         audio_update_split_engines(0);
         car_update_pair_cols();
         effect_update_wheel_skids();
@@ -1362,6 +1370,7 @@ void race_run_two_player(void)
         race_view.active_car = (uint32)(1);
         select_secondary_view(buffer);
         disp_swap();
+        hd_race_view(1, &disp_state.frames[buffer].draw);
         disp_clear_ordering_table();
         model_packet_pool_reset();
         slot = race_view.active_car;
@@ -1369,6 +1378,7 @@ void race_run_two_player(void)
         model_update_lod_distances(pos, 1500, 3000);
         slot = race_view.active_car;
         camera_update(&car_states[slot], slot);
+        hd_capture_race_poses();
         hud_update_countdown();
         sky_draw((sint32)race_view.active_car);
         effect_draw_wheel_skids();
@@ -1394,17 +1404,21 @@ void race_run_two_player(void)
         audio_poll_xa();
         DrawSync(0);
         disp_apply_frame(buffer);
+        hd_native_begin(1, &disp_state.frames[buffer].draw);
         disp_draw_ordering_table();
+        hd_native_end(1);
         audio_update_split_engines(1);
         audio_update_spatial();
         if ((sint32)elapsed <= 65534)
             ++elapsed;
         if ((sint32)elapsed >= 9)
-            update_pause();
+            update_pause(&clock.field);
+        hd_end_frame();
     }
     DrawSync(0);
     VSync(0);
     audio_key_off_all_voices();
+    hd_suspend();
 }
 
 static uint32 set_split_mode(uint32 mode)
@@ -2182,6 +2196,35 @@ uint32 race_ai_heading_error(const RACE_AI_CAR *rec)
     return (0 - difference) & 0xFFF;
 }
 
+static void filter_traffic_spawns(void)
+{
+    uint32 source, count = 0;
+    RACE_TRAFFIC_LIST *traffic = &race_ai.traffic;
+    for (source = 0; source + 1 < traffic->count; ++source)
+    {
+        RACE_TRAFFIC_RECORD record = traffic->records[source];
+        uint32 node = (uint32)(sint32)record.node;
+        uint32 lane = record.side;
+        uint32 lanes;
+        if (node >= track_geometry.node_count)
+            continue;
+        lanes = track_geometry.node_bytes[node * 24 + 3] & 15;
+        if (lane >= lanes)
+        {
+            node = track_map_branch_node(record.node);
+            lane -= lanes;
+        }
+        if (node >= track_geometry.node_count)
+            continue;
+        lanes = track_geometry.node_bytes[node * 24 + 3] & 15;
+        if (lane >= lanes)
+            continue;
+        traffic->records[count++] = record;
+    }
+    traffic->records[count] = traffic->records[traffic->count - 1];
+    traffic->count = count + 1;
+}
+
 static uint32 load_ai_routes(void)
 {
     char filename[64];
@@ -2255,6 +2298,7 @@ static uint32 load_ai_routes(void)
             for (sample = 0; sample + 1 < race_ai.traffic.count; ++sample)
                 XASSERT(!(race_ai.traffic.records[sample].node < 0));
             XASSERT(!(race_ai.traffic.records[sample].node != -1));
+            filter_traffic_spawns();
         }
     }
     return result;
@@ -2388,6 +2432,8 @@ static uint32 update_ai_intervals(uint32 slot)
 
 static uint32 ai_target_side_factor(sint32 node, uint32 slot, const VEC3 *point)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     const uint8 *seg;
     const uint8 *vertices;
     uint32 type;
@@ -2416,14 +2462,14 @@ static uint32 ai_target_side_factor(sint32 node, uint32 slot, const VEC3 *point)
     type = seg[0];
     vertices = track_geometry.vertex_bytes;
     count = seg[3];
-    vertex = xport_load_le16(seg + 6);
+    vertex = (memcpy(&wire_halfword_1, seg + 6, sizeof(wire_halfword_1)), wire_halfword_1);
     XASSERT(!(type >= 12));
     extension = track_boundary_offsets[type].vertex_offset1;
     point_z = point->bits.z;
     endpoint_idx = vertex + (count & 15) + extension;
     XASSERT(!(endpoint_idx >= track_geometry.vertex_count));
     endpoint = vertices + endpoint_idx * 6;
-    x = (sint16)xport_load_le16(endpoint);
+    x = (sint16)(memcpy(&wire_halfword_2, endpoint, sizeof(wire_halfword_2)), wire_halfword_2);
     memcpy(&origin_x, seg + 12, sizeof(origin_x));
     world_x = car_states[(slot * 864) / 864u].pos.bits.x;
     world_z = car_states[(slot * 864) / 864u].pos.bits.z;
@@ -2431,7 +2477,7 @@ static uint32 ai_target_side_factor(sint32 node, uint32 slot, const VEC3 *point)
     target_z = ((sint32)(0 - point_z - world_z) >> 8);
     dot = x * target_z;
     point_x = point->bits.x;
-    z = (sint16)xport_load_le16(endpoint + 4);
+    z = (sint16)(memcpy(&wire_halfword_3, endpoint + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     memcpy(&origin_z, seg + 20, sizeof(origin_z));
     target_x = ((sint32)(point_x - world_x) >> 8);
     z = origin_z + z - (uint32)((sint32)world_z >> 8);
@@ -2450,6 +2496,9 @@ static uint32 ai_target_side_factor(sint32 node, uint32 slot, const VEC3 *point)
 
 static uint32 compute_ai_target(sint32 node, uint32 factor, VEC3 *output, uint32 offset)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     SVECTOR n;
     const uint8 *seg;
     const uint8 *vertices;
@@ -2477,7 +2526,7 @@ static uint32 compute_ai_target(sint32 node, uint32 factor, VEC3 *output, uint32
     vertices = track_geometry.vertex_bytes;
     XASSERT(!(node < 0 || (uint32)node >= track_geometry.node_count));
     seg += (uint32)node * 24;
-    vertex = xport_load_le16(seg + 4);
+    vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     type = seg[0];
     count = seg[3];
     memcpy(&origin_x, seg + 12, sizeof(origin_x));
@@ -2485,16 +2534,16 @@ static uint32 compute_ai_target(sint32 node, uint32 factor, VEC3 *output, uint32
     extension = track_boundary_offsets[type].vertex_offset0;
     XASSERT(!(vertex >= track_geometry.vertex_count));
     point0 = vertices + vertex * 6;
-    x = (sint16)xport_load_le16(point0);
+    x = (sint16)(memcpy(&wire_halfword_2, point0, sizeof(wire_halfword_2)), wire_halfword_2);
     idx1 = vertex + (count & 15) + extension;
     XASSERT(!(idx1 >= track_geometry.vertex_count));
     point1 = vertices + idx1 * 6;
-    z = (sint16)xport_load_le16(point1);
+    z = (sint16)(memcpy(&wire_halfword_3, point1, sizeof(wire_halfword_3)), wire_halfword_3);
     start_x = origin_x + (uint32)x;
     delta_x = origin_x + (uint32)z - start_x;
     memcpy(&origin_z, seg + 20, sizeof(origin_z));
-    x = (sint16)xport_load_le16(point0 + 4);
-    z = (sint16)xport_load_le16(point1 + 4);
+    x = (sint16)(memcpy(&wire_halfword_4, point0 + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+    z = (sint16)(memcpy(&wire_halfword_5, point1 + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     start_z = origin_z + (uint32)x;
     delta_z = origin_z + (uint32)z - start_z;
     output->bits.x = (start_x << 8) + factor * delta_x;
@@ -3556,6 +3605,10 @@ static uint32 update_traffic_car(uint32 slot)
 
 static uint32 update_ai_seg(RACE_AI_CAR *owner)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+
     uint32 car_offset;
     const uint8 *seg;
     const uint8 *vertices;
@@ -3595,10 +3648,10 @@ static uint32 update_ai_seg(RACE_AI_CAR *owner)
     vertices = track_geometry.vertex_bytes;
     XASSERT(!(node < 0 || (uint32)node >= track_geometry.node_count));
     seg += (uint32)node * 24;
-    vertex = xport_load_le16(seg + 4);
+    vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     lane = car_states[(car_offset) / 864u].track_location.lane;
     memcpy(&origin_x, seg + 12, sizeof(origin_x));
-    other_vertex = xport_load_le16(seg + 6);
+    other_vertex = (memcpy(&wire_halfword_2, seg + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     type = seg[0];
     memcpy(&origin_z, seg + 20, sizeof(origin_z));
     XASSERT(!(type < 1 || type > 11));
@@ -3619,27 +3672,27 @@ static uint32 update_ai_seg(RACE_AI_CAR *owner)
             if (type == 6 || type == 7)
                 other -= 6;
         }
-        left = (sint16)xport_load_le16(other);
-        right = (sint16)xport_load_le16(point0);
+        left = (sint16)(memcpy(&wire_halfword_3, other, sizeof(wire_halfword_3)), wire_halfword_3);
+        right = (sint16)(memcpy(&wire_halfword_4, point0, sizeof(wire_halfword_4)), wire_halfword_4);
         lateral_x = ((left - right) / 2);
-        left = (sint16)xport_load_le16(other + 4);
-        right = (sint16)xport_load_le16(point0 + 4);
+        left = (sint16)(memcpy(&wire_halfword_5, other + 4, sizeof(wire_halfword_5)), wire_halfword_5);
+        right = (sint16)(memcpy(&wire_halfword_6, point0 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
         lateral_z = ((left - right) / 2);
         car_offset = owner->car_slot * 864;
         coord = (uint32)(car_states[(car_offset) / 864u].pos.x >> 8);
-        right = (sint16)xport_load_le16(point0);
+        right = (sint16)(memcpy(&wire_halfword_7, point0, sizeof(wire_halfword_7)), wire_halfword_7);
         difference = (coord - (origin_x + (uint32)right));
         relative_x = (difference / 2);
         car_offset = owner->car_slot * 864;
         coord = (uint32)(car_states[(car_offset) / 864u].pos.z >> 8);
-        right = (sint16)xport_load_le16(point0 + 4);
+        right = (sint16)(memcpy(&wire_halfword_8, point0 + 4, sizeof(wire_halfword_8)), wire_halfword_8);
         difference = (coord - (origin_z + (uint32)right));
         relative_z = (difference / 2);
-        left = (sint16)xport_load_le16(point1);
-        right = (sint16)xport_load_le16(point0);
+        left = (sint16)(memcpy(&wire_halfword_9, point1, sizeof(wire_halfword_9)), wire_halfword_9);
+        right = (sint16)(memcpy(&wire_halfword_10, point0, sizeof(wire_halfword_10)), wire_halfword_10);
         longitudinal_x = ((left - right) / 2);
-        left = (sint16)xport_load_le16(point1 + 4);
-        right = (sint16)xport_load_le16(point0 + 4);
+        left = (sint16)(memcpy(&wire_halfword_11, point1 + 4, sizeof(wire_halfword_11)), wire_halfword_11);
+        right = (sint16)(memcpy(&wire_halfword_12, point0 + 4, sizeof(wire_halfword_12)), wire_halfword_12);
         longitudinal_z = ((left - right) / 2);
     }
     a = lateral_x;
@@ -4207,6 +4260,8 @@ static uint32 respawn_traffic_car(void)
 
 uint32 race_update_lap_timer(CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint32 result;
     uint32 checkpoint_count;
@@ -4279,12 +4334,12 @@ uint32 race_update_lap_timer(CAR_STATE *car)
     node = (sint16)car->track_location.n_node;
     XASSERT(!(scene_level_image.size < 6 || (size_t)(desc - scene_level_image.bytes) > scene_level_image.size - 6 || lap > (scene_level_image.size - 6 - (size_t)(desc - scene_level_image.bytes)) / 4));
     desc += lap * 4;
-    result = xport_load_le16(desc + 4);
+    result = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     if (result != node)
         return result;
     lap = car->completed_laps;
     XASSERT(!(scene_level_image.size < 8 || (size_t)(desc - scene_level_image.bytes) > scene_level_image.size - 8));
-    bonus = xport_load_le16(desc + 6);
+    bonus = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     timer = car->checkpoint_timer;
     incremented = lap + 1;
     car->completed_laps = (uint8)(incremented);

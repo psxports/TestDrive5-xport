@@ -56,6 +56,11 @@ static uint32 triangle_n(sint32 v0, sint32 v1, sint32 v2, SVECTOR *output);
 
 TRACK_POSITION_RESULT track_place_location(TRACK_LOCATION *node, VEC3 *pos)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14;
+
     TRACK_POSITION_RESULT result;
     sint32 idx;
     const uint8 *desc;
@@ -83,8 +88,8 @@ TRACK_POSITION_RESULT track_place_location(TRACK_LOCATION *node, VEC3 *pos)
     node->max_path_count = (uint16)(idx);
     type = (desc)[0];
     lanes = (desc + 3)[0];
-    left_idx = xport_load_le16(desc + 4);
-    right_idx = xport_load_le16(desc + 6);
+    left_idx = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
+    right_idx = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     left_offset = cell_rules[type].left_offset;
     right_offset = cell_rules[type].right_offset;
     result.lane = node->lane;
@@ -101,24 +106,24 @@ TRACK_POSITION_RESULT track_place_location(TRACK_LOCATION *node, VEC3 *pos)
     XASSERT(!(track_geometry.vertex_count < 2 || (uint32)(left_idx + (uint32)result.lane) >= track_geometry.vertex_count - 1 || (uint32)(right_idx + (uint32)result.lane) >= track_geometry.vertex_count - 1));
     left_points = points + (left_idx + (uint32)result.lane) * 6;
     right_points = points + (right_idx + (uint32)result.lane) * 6;
-    a = (sint16)xport_load_le16(left_points);
-    b = (sint16)xport_load_le16(left_points + 6);
-    c = (sint16)xport_load_le16(right_points);
-    d = (sint16)xport_load_le16(right_points + 6);
+    a = (sint16)(memcpy(&wire_halfword_3, left_points, sizeof(wire_halfword_3)), wire_halfword_3);
+    b = (sint16)(memcpy(&wire_halfword_4, left_points + 6, sizeof(wire_halfword_4)), wire_halfword_4);
+    c = (sint16)(memcpy(&wire_halfword_5, right_points, sizeof(wire_halfword_5)), wire_halfword_5);
+    d = (sint16)(memcpy(&wire_halfword_6, right_points + 6, sizeof(wire_halfword_6)), wire_halfword_6);
     delta = (uint32)(a + b + c + d) << 6;
     pos->bits.x = (base << 8) + delta;
     memcpy(&base, desc + 16, sizeof(base));
-    a = (sint16)xport_load_le16(left_points + 2);
-    b = (sint16)xport_load_le16(left_points + 8);
-    result.right_vertex_y = (sint16)xport_load_le16(right_points + 2);
-    d = (sint16)xport_load_le16(right_points + 8);
+    a = (sint16)(memcpy(&wire_halfword_7, left_points + 2, sizeof(wire_halfword_7)), wire_halfword_7);
+    b = (sint16)(memcpy(&wire_halfword_8, left_points + 8, sizeof(wire_halfword_8)), wire_halfword_8);
+    result.right_vertex_y = (sint16)(memcpy(&wire_halfword_9, right_points + 2, sizeof(wire_halfword_9)), wire_halfword_9);
+    d = (sint16)(memcpy(&wire_halfword_10, right_points + 8, sizeof(wire_halfword_10)), wire_halfword_10);
     delta = (uint32)(a + b + result.right_vertex_y + d) << 6;
     pos->bits.y = (base << 8) + delta;
     memcpy(&base, desc + 20, sizeof(base));
-    a = (sint16)xport_load_le16(left_points + 4);
-    b = (sint16)xport_load_le16(left_points + 10);
-    c = (sint16)xport_load_le16(right_points + 4);
-    d = (sint16)xport_load_le16(right_points + 10);
+    a = (sint16)(memcpy(&wire_halfword_11, left_points + 4, sizeof(wire_halfword_11)), wire_halfword_11);
+    b = (sint16)(memcpy(&wire_halfword_12, left_points + 10, sizeof(wire_halfword_12)), wire_halfword_12);
+    c = (sint16)(memcpy(&wire_halfword_13, right_points + 4, sizeof(wire_halfword_13)), wire_halfword_13);
+    d = (sint16)(memcpy(&wire_halfword_14, right_points + 10, sizeof(wire_halfword_14)), wire_halfword_14);
     result.z_delta = (uint32)(a + b + c + d) << 6;
     pos->bits.z = (base << 8) + result.z_delta;
     return result;
@@ -126,6 +131,11 @@ TRACK_POSITION_RESULT track_place_location(TRACK_LOCATION *node, VEC3 *pos)
 
 static uint32 triangle_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *pos)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15;
+
     VECTOR left = {0};
     VECTOR right = {0};
     VECTOR n = {0};
@@ -148,24 +158,24 @@ static uint32 triangle_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *pos
     points = track_geometry.vertex_bytes;
     a = points + v0_offset;
     b = points + (uint32)(sint16)v1 * 6;
-    val0 = (sint16)xport_load_le16(a);
-    val1 = (sint16)xport_load_le16(b);
+    val0 = (sint16)(memcpy(&wire_halfword_1, a, sizeof(wire_halfword_1)), wire_halfword_1);
+    val1 = (sint16)(memcpy(&wire_halfword_2, b, sizeof(wire_halfword_2)), wire_halfword_2);
     left.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(b + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_3, a + 2, sizeof(wire_halfword_3)), wire_halfword_3);
+    val1 = (sint16)(memcpy(&wire_halfword_4, b + 2, sizeof(wire_halfword_4)), wire_halfword_4);
     left.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(b + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_5, a + 4, sizeof(wire_halfword_5)), wire_halfword_5);
+    val1 = (sint16)(memcpy(&wire_halfword_6, b + 4, sizeof(wire_halfword_6)), wire_halfword_6);
     left.vz = val0 - val1;
-    val0 = (sint16)xport_load_le16(a);
+    val0 = (sint16)(memcpy(&wire_halfword_7, a, sizeof(wire_halfword_7)), wire_halfword_7);
     c = points + (uint32)(sint16)v2 * 6;
-    val1 = (sint16)xport_load_le16(c);
+    val1 = (sint16)(memcpy(&wire_halfword_8, c, sizeof(wire_halfword_8)), wire_halfword_8);
     right.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(c + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_9, a + 2, sizeof(wire_halfword_9)), wire_halfword_9);
+    val1 = (sint16)(memcpy(&wire_halfword_10, c + 2, sizeof(wire_halfword_10)), wire_halfword_10);
     right.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(c + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_11, a + 4, sizeof(wire_halfword_11)), wire_halfword_11);
+    val1 = (sint16)(memcpy(&wire_halfword_12, c + 4, sizeof(wire_halfword_12)), wire_halfword_12);
     right.vz = val0 - val1;
     OuterProduct0(&left, &right, &n);
     n_x = n.vx >> 4;
@@ -176,18 +186,21 @@ static uint32 triangle_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *pos
     points = track_geometry.vertex_bytes;
     pos_val = pos->vx;
     a = points + v0_offset;
-    val0 = (sint16)xport_load_le16(a);
+    val0 = (sint16)(memcpy(&wire_halfword_13, a, sizeof(wire_halfword_13)), wire_halfword_13);
     dot = ((uint32)val0 - (uint32)pos_val) * (uint32)n_x;
-    val0 = (sint16)xport_load_le16(a + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_14, a + 4, sizeof(wire_halfword_14)), wire_halfword_14);
     pos_val = pos->vz;
     dot += ((uint32)val0 - (uint32)pos_val) * (uint32)n_z;
     quotient = fixed_divide_checked((sint32)dot, n_y);
-    val0 = (sint16)xport_load_le16(a + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_15, a + 2, sizeof(wire_halfword_15)), wire_halfword_15);
     return ((uint32)quotient + (uint32)val0) << 8;
 }
 
 uint32 track_surface_height(TRACK_LOCATION *node, const VEC3 *pos, uint32 *height)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     VECTOR relative = {0};
     sint32 node_idx;
     const uint8 *desc;
@@ -218,13 +231,13 @@ uint32 track_surface_height(TRACK_LOCATION *node, const VEC3 *pos, uint32 *heigh
     XASSERT(!(node_idx < 0 || (uint32)node_idx >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node_idx * 24;
     type = (desc)[0];
-    left_idx = xport_load_le16(desc + 4);
+    left_idx = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     offset = cell_rules[type].left_offset;
     lane = node->lane;
     lanes = (desc + 3)[0];
     left_idx += (uint32)offset + lane;
     node->left_vertex = (uint16)(left_idx);
-    right_idx = xport_load_le16(desc + 6);
+    right_idx = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     offset = cell_rules[type].right_offset;
     right_idx += (uint32)offset + lane;
     node->right_vertex = (uint16)(right_idx);
@@ -262,10 +275,10 @@ uint32 track_surface_height(TRACK_LOCATION *node, const VEC3 *pos, uint32 *heigh
         XASSERT(!(track_geometry.vertex_count < 2 || left_idx >= track_geometry.vertex_count || right_idx >= track_geometry.vertex_count - 1));
         point0 = points + left_idx * 6;
         point1 = points + right_idx * 6 + 6;
-        z0 = (sint16)xport_load_le16(point0 + 4);
-        x1 = (sint16)xport_load_le16(point1);
-        x0 = (sint16)xport_load_le16(point0);
-        z1 = (sint16)xport_load_le16(point1 + 4);
+        z0 = (sint16)(memcpy(&wire_halfword_3, point0 + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        x1 = (sint16)(memcpy(&wire_halfword_4, point1, sizeof(wire_halfword_4)), wire_halfword_4);
+        x0 = (sint16)(memcpy(&wire_halfword_5, point0, sizeof(wire_halfword_5)), wire_halfword_5);
+        z1 = (sint16)(memcpy(&wire_halfword_6, point1 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
         cross = ((uint32)relative.vz - (uint32)z0) * (uint32)(x1 - x0);
         cross -= ((uint32)relative.vx - (uint32)x0) * (uint32)(z1 - z0);
         action = (sint32)cross > 0 ? 1 : -1;
@@ -280,8 +293,81 @@ uint32 track_surface_height(TRACK_LOCATION *node, const VEC3 *pos, uint32 *heigh
     return result;
 }
 
+sint32 track_render_surface_height(const TRACK_LOCATION *node, const VEC3 *pos, float *height)
+{
+    const uint8 *desc;
+    VEC3 origin;
+    VEC3_16 vertices[3];
+    uint16 first, last;
+    uint32 type, lanes, corner;
+    sint32 left, right, action = 0, indices[3];
+    float x, z, ax, ay, az, bx, by, bz, nx, ny, nz;
+    XASSERT((sint16)node->node >= 0 && node->node < track_geometry.node_count);
+    desc = track_geometry.node_bytes + (size_t)node->node * 24;
+    type = desc[0];
+    lanes = desc[3] & 15;
+    if (type > 11)
+        return 0;
+    memcpy(&first, desc + 4, sizeof(first));
+    memcpy(&last, desc + 6, sizeof(last));
+    memcpy(&origin, desc + 12, sizeof(origin));
+    left = first + cell_rules[type].left_offset + node->lane;
+    right = last + cell_rules[type].right_offset + node->lane;
+    x = pos->x / 256.0f - origin.x;
+    z = pos->z / 256.0f - origin.z;
+    if (node->lane == 0)
+    {
+        if (type == 0)
+            return 0;
+        if (type == 3 || type == 4)
+            action = 2;
+        else if (type == 6 || type == 7)
+            action = 1;
+    }
+    else if (node->lane == lanes - 1)
+    {
+        if (type == 0)
+            return 0;
+        if (type == 2 || type == 4)
+            action = -1;
+        else if (type == 5 || type == 7)
+            action = 3;
+    }
+    if (action == 0)
+    {
+        VEC3_16 a, b;
+        XASSERT(left >= 0 && right >= 0 && (uint32)left < track_geometry.vertex_count && (uint32)(right + 1) < track_geometry.vertex_count);
+        memcpy(&a, track_geometry.vertex_bytes + (size_t)left * sizeof(a), sizeof(a));
+        memcpy(&b, track_geometry.vertex_bytes + (size_t)(right + 1) * sizeof(b), sizeof(b));
+        action = (z - a.z) * ((float)b.x - a.x) - (x - a.x) * ((float)b.z - a.z) > 0.0f ? 1 : -1;
+    }
+    indices[0] = (sint16)(left + (action == 2 ? 1 : 0));
+    indices[1] = (sint16)(right + (action == 1 ? 1 : 0));
+    indices[2] = (sint16)((action == 1 || action == 3 ? left : right) + 1);
+    for (corner = 0; corner < 3; ++corner)
+    {
+        XASSERT(indices[corner] >= 0 && (uint32)indices[corner] < track_geometry.vertex_count);
+        memcpy(&vertices[corner], track_geometry.vertex_bytes + (size_t)indices[corner] * sizeof(vertices[corner]), sizeof(vertices[corner]));
+    }
+    ax = (float)vertices[0].x - vertices[1].x;
+    ay = (float)vertices[0].y - vertices[1].y;
+    az = (float)vertices[0].z - vertices[1].z;
+    bx = (float)vertices[0].x - vertices[2].x;
+    by = (float)vertices[0].y - vertices[2].y;
+    bz = (float)vertices[0].z - vertices[2].z;
+    nx = ay * bz - az * by;
+    ny = az * bx - ax * bz;
+    nz = ax * by - ay * bx;
+    if (ny == 0.0f)
+        ny = 16.0f;
+    *height = origin.y + vertices[0].y + ((vertices[0].x - x) * nx + (vertices[0].z - z) * nz) / ny;
+    return 1;
+}
+
 uint32 track_update_location(TRACK_LOCATION *node, const VEC3 *pos)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     TRACK_LOCATION *destination = node;
     TRACK_LOCATION candidate = *node;
     uint32 cur;
@@ -430,16 +516,16 @@ uint32 track_update_location(TRACK_LOCATION *node, const VEC3 *pos)
                     if (classification == 3)
                     {
                         XASSERT(!(edge.end == edge.points));
-                        prev_z = (sint16)xport_load_le16(edge.end - 2);
-                        prev_x = (sint16)xport_load_le16(edge.end - 6);
+                        prev_z = (sint16)(memcpy(&wire_halfword_1, edge.end - 2, sizeof(wire_halfword_1)), wire_halfword_1);
+                        prev_x = (sint16)(memcpy(&wire_halfword_2, edge.end - 6, sizeof(wire_halfword_2)), wire_halfword_2);
                         cross = ((uint32)cell.relative.vz - (uint32)prev_z) * (uint32)(edge.end_x - prev_x);
                         cross -= ((uint32)cell.relative.vx - (uint32)prev_x) * (uint32)(edge.end_z - prev_z);
                     }
                     else
                     {
                         XASSERT(!(edge.start == edge.points));
-                        next_x = (sint16)xport_load_le16(edge.start - 6);
-                        next_z = (sint16)xport_load_le16(edge.start - 2);
+                        next_x = (sint16)(memcpy(&wire_halfword_3, edge.start - 6, sizeof(wire_halfword_3)), wire_halfword_3);
+                        next_z = (sint16)(memcpy(&wire_halfword_4, edge.start - 2, sizeof(wire_halfword_4)), wire_halfword_4);
                         cross = ((uint32)cell.relative.vz - (uint32)edge.start_z) * (uint32)(next_x - edge.start_x);
                         cross -= ((uint32)cell.relative.vx - (uint32)edge.start_x) * (uint32)(next_z - edge.start_z);
                     }
@@ -534,6 +620,8 @@ static const uint8 *inc_location_count(TRACK_LOCATION *node, sint32 reload_base)
 
 static TRACK_TRANSITION next_location(uint32 node, uint32 type, uint32 lane, sint32 dir)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     TRACK_TRANSITION next;
     const uint8 *base;
     const uint8 *cur;
@@ -550,7 +638,7 @@ static TRACK_TRANSITION next_location(uint32 node, uint32 type, uint32 lane, sin
     cur = base + node * 24;
     if (type == (dir > 0 ? 10 : 9))
     {
-        next.node = (uint32)(sint16)xport_load_le16(cur + link);
+        next.node = (uint32)(sint16)(memcpy(&wire_halfword_1, cur + link, sizeof(wire_halfword_1)), wire_halfword_1);
         XASSERT(!(next.node >= track_geometry.node_count));
         target_lanes = (base + next.node * 24 + 3)[0];
         cur_lanes = (cur + 3)[0];
@@ -562,7 +650,7 @@ static TRACK_TRANSITION next_location(uint32 node, uint32 type, uint32 lane, sin
         target_lanes = (cur + (dir > 0 ? 27 : -21))[0] & 15;
         if ((sint32)lane >= (sint32)target_lanes)
         {
-            next.node = (uint32)(sint16)xport_load_le16(cur + link);
+            next.node = (uint32)(sint16)(memcpy(&wire_halfword_2, cur + link, sizeof(wire_halfword_2)), wire_halfword_2);
             XASSERT(!(next.node >= track_geometry.node_count));
             cur_lanes = (cur + 3)[0];
             target_lanes = (base + next.node * 24 + 3)[0];
@@ -581,6 +669,8 @@ static TRACK_TRANSITION next_location(uint32 node, uint32 type, uint32 lane, sin
 
 static TRACK_EDGE_VIEW read_edge(const uint8 *points, uint32 start, uint32 end, const VECTOR *relative)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     TRACK_EDGE_VIEW edge;
     uint32 cross;
 
@@ -588,10 +678,10 @@ static TRACK_EDGE_VIEW read_edge(const uint8 *points, uint32 start, uint32 end, 
     edge.points = points;
     edge.start = points + start * 6;
     edge.end = points + end * 6;
-    edge.start_z = (sint16)xport_load_le16(edge.start + 4);
-    edge.end_x = (sint16)xport_load_le16(edge.end);
-    edge.start_x = (sint16)xport_load_le16(edge.start);
-    edge.end_z = (sint16)xport_load_le16(edge.end + 4);
+    edge.start_z = (sint16)(memcpy(&wire_halfword_1, edge.start + 4, sizeof(wire_halfword_1)), wire_halfword_1);
+    edge.end_x = (sint16)(memcpy(&wire_halfword_2, edge.end, sizeof(wire_halfword_2)), wire_halfword_2);
+    edge.start_x = (sint16)(memcpy(&wire_halfword_3, edge.start, sizeof(wire_halfword_3)), wire_halfword_3);
+    edge.end_z = (sint16)(memcpy(&wire_halfword_4, edge.end + 4, sizeof(wire_halfword_4)), wire_halfword_4);
     cross = ((uint32)relative->vz - (uint32)edge.start_z) * (uint32)(edge.end_x - edge.start_x);
     cross -= ((uint32)relative->vx - (uint32)edge.start_x) * (uint32)(edge.end_z - edge.start_z);
     edge.cross = (sint32)cross;
@@ -600,6 +690,8 @@ static TRACK_EDGE_VIEW read_edge(const uint8 *points, uint32 start, uint32 end, 
 
 static TRACK_CELL_VIEW read_cell(const uint8 *desc, const VEC3 *pos, sint32 read_lanes)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     TRACK_CELL_VIEW cell = {0};
     uint32 val;
     uint32 base;
@@ -609,8 +701,8 @@ static TRACK_CELL_VIEW read_cell(const uint8 *desc, const VEC3 *pos, sint32 read
     cell.type = (desc)[0];
     if (read_lanes != 0)
         cell.lanes = (desc + 3)[0] & 15;
-    cell.left = xport_load_le16(desc + 4);
-    cell.right = xport_load_le16(desc + 6);
+    cell.left = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
+    cell.right = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     val = pos->bits.x;
     memcpy(&base, desc + 12, sizeof(base));
     left_offset = cell_rules[cell.type].left_offset;
@@ -629,6 +721,8 @@ static TRACK_CELL_VIEW read_cell(const uint8 *desc, const VEC3 *pos, sint32 read
 
 static uint32 classify_surface_quad(uint32 mask, const VECTOR *pos, const uint8 *points, uint32 v0, uint32 v1, uint32 v2, uint32 v3)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     uint32 starts[4];
     uint32 ends[4];
     uint32 idx;
@@ -657,13 +751,13 @@ static uint32 classify_surface_quad(uint32 mask, const VECTOR *pos, const uint8 
         if ((mask & bit) != 0)
         {
             XASSERT(!(starts[idx] >= track_geometry.vertex_count || ends[idx] >= track_geometry.vertex_count));
-            start_z = (sint16)xport_load_le16(points + starts[idx] * 6 + 4);
+            start_z = (sint16)(memcpy(&wire_halfword_1, points + starts[idx] * 6 + 4, sizeof(wire_halfword_1)), wire_halfword_1);
             z = (uint32)pos->vz;
-            end_x = (sint16)xport_load_le16(points + ends[idx] * 6);
-            start_x = (sint16)xport_load_le16(points + starts[idx] * 6);
+            end_x = (sint16)(memcpy(&wire_halfword_2, points + ends[idx] * 6, sizeof(wire_halfword_2)), wire_halfword_2);
+            start_x = (sint16)(memcpy(&wire_halfword_3, points + starts[idx] * 6, sizeof(wire_halfword_3)), wire_halfword_3);
             cross = (z - (uint32)start_z) * (uint32)(end_x - start_x);
             x = (uint32)pos->vx;
-            end_z = (sint16)xport_load_le16(points + ends[idx] * 6 + 4);
+            end_z = (sint16)(memcpy(&wire_halfword_4, points + ends[idx] * 6 + 4, sizeof(wire_halfword_4)), wire_halfword_4);
             cross -= (x - (uint32)start_x) * (uint32)(end_z - start_z);
             if ((sint32)cross > 0)
                 result |= bit;
@@ -674,6 +768,11 @@ static uint32 classify_surface_quad(uint32 mask, const VECTOR *pos, const uint8 
 
 static uint32 triangle_n_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *pos, SVECTOR *output)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15;
+
     VECTOR left = {0};
     VECTOR right = {0};
     VECTOR n = {0};
@@ -696,24 +795,24 @@ static uint32 triangle_n_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *p
     points = track_geometry.vertex_bytes;
     a = points + v0_offset;
     b = points + (uint32)(sint16)v1 * 6;
-    val0 = (sint16)xport_load_le16(a);
-    val1 = (sint16)xport_load_le16(b);
+    val0 = (sint16)(memcpy(&wire_halfword_1, a, sizeof(wire_halfword_1)), wire_halfword_1);
+    val1 = (sint16)(memcpy(&wire_halfword_2, b, sizeof(wire_halfword_2)), wire_halfword_2);
     left.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(b + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_3, a + 2, sizeof(wire_halfword_3)), wire_halfword_3);
+    val1 = (sint16)(memcpy(&wire_halfword_4, b + 2, sizeof(wire_halfword_4)), wire_halfword_4);
     left.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(b + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_5, a + 4, sizeof(wire_halfword_5)), wire_halfword_5);
+    val1 = (sint16)(memcpy(&wire_halfword_6, b + 4, sizeof(wire_halfword_6)), wire_halfword_6);
     left.vz = val0 - val1;
-    val0 = (sint16)xport_load_le16(a);
+    val0 = (sint16)(memcpy(&wire_halfword_7, a, sizeof(wire_halfword_7)), wire_halfword_7);
     c = points + (uint32)(sint16)v2 * 6;
-    val1 = (sint16)xport_load_le16(c);
+    val1 = (sint16)(memcpy(&wire_halfword_8, c, sizeof(wire_halfword_8)), wire_halfword_8);
     right.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(c + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_9, a + 2, sizeof(wire_halfword_9)), wire_halfword_9);
+    val1 = (sint16)(memcpy(&wire_halfword_10, c + 2, sizeof(wire_halfword_10)), wire_halfword_10);
     right.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(c + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_11, a + 4, sizeof(wire_halfword_11)), wire_halfword_11);
+    val1 = (sint16)(memcpy(&wire_halfword_12, c + 4, sizeof(wire_halfword_12)), wire_halfword_12);
     right.vz = val0 - val1;
     OuterProduct0(&left, &right, &n);
     n.vx >>= 12;
@@ -725,21 +824,24 @@ static uint32 triangle_n_height(sint32 v0, sint32 v1, sint32 v2, const VECTOR *p
     points = track_geometry.vertex_bytes;
     pos_val = pos->vx;
     a = points + v0_offset;
-    val0 = (sint16)xport_load_le16(a);
+    val0 = (sint16)(memcpy(&wire_halfword_13, a, sizeof(wire_halfword_13)), wire_halfword_13);
     n_x = output->vx;
     dot = ((uint32)val0 - (uint32)pos_val) * (uint32)n_x;
-    val0 = (sint16)xport_load_le16(a + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_14, a + 4, sizeof(wire_halfword_14)), wire_halfword_14);
     pos_val = pos->vz;
     n_z = output->vz;
     dot += ((uint32)val0 - (uint32)pos_val) * (uint32)n_z;
     n_y = output->vy;
     quotient = fixed_divide_checked((sint32)dot, n_y);
-    val0 = (sint16)xport_load_le16(a + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_15, a + 2, sizeof(wire_halfword_15)), wire_halfword_15);
     return ((uint32)quotient + (uint32)val0) << 8;
 }
 
 uint32 track_surface_n_height(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *n, uint32 *height)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     VECTOR relative = {0};
     sint32 node_idx;
     const uint8 *desc;
@@ -770,13 +872,13 @@ uint32 track_surface_n_height(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *n,
     XASSERT(!(node_idx < 0 || (uint32)node_idx >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node_idx * 24;
     type = (desc)[0];
-    left_idx = xport_load_le16(desc + 4);
+    left_idx = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     offset = cell_rules[type].left_offset;
     lane = node->lane;
     lanes = (desc + 3)[0];
     left_idx += (uint32)offset + lane;
     node->left_vertex = (uint16)(left_idx);
-    right_idx = xport_load_le16(desc + 6);
+    right_idx = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     offset = cell_rules[type].right_offset;
     right_idx += (uint32)offset + lane;
     node->right_vertex = (uint16)(right_idx);
@@ -814,10 +916,10 @@ uint32 track_surface_n_height(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *n,
         XASSERT(!(track_geometry.vertex_count < 2 || left_idx >= track_geometry.vertex_count || right_idx >= track_geometry.vertex_count - 1));
         point0 = points + left_idx * 6;
         point1 = points + right_idx * 6 + 6;
-        z0 = (sint16)xport_load_le16(point0 + 4);
-        x1 = (sint16)xport_load_le16(point1);
-        x0 = (sint16)xport_load_le16(point0);
-        z1 = (sint16)xport_load_le16(point1 + 4);
+        z0 = (sint16)(memcpy(&wire_halfword_3, point0 + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        x1 = (sint16)(memcpy(&wire_halfword_4, point1, sizeof(wire_halfword_4)), wire_halfword_4);
+        x0 = (sint16)(memcpy(&wire_halfword_5, point0, sizeof(wire_halfword_5)), wire_halfword_5);
+        z1 = (sint16)(memcpy(&wire_halfword_6, point1 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
         cross = ((uint32)relative.vz - (uint32)z0) * (uint32)(x1 - x0);
         cross -= ((uint32)relative.vx - (uint32)x0) * (uint32)(z1 - z0);
         action = (sint32)cross > 0 ? 1 : -1;
@@ -834,6 +936,10 @@ uint32 track_surface_n_height(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *n,
 
 static uint32 triangle_n(sint32 v0, sint32 v1, sint32 v2, SVECTOR *output)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+
     VECTOR left = {0};
     VECTOR right = {0};
     VECTOR n = {0};
@@ -849,24 +955,24 @@ static uint32 triangle_n(sint32 v0, sint32 v1, sint32 v2, SVECTOR *output)
     points = track_geometry.vertex_bytes;
     a = points + (uint32)(sint16)v0 * 6;
     b = points + (uint32)(sint16)v1 * 6;
-    val0 = (sint16)xport_load_le16(a);
-    val1 = (sint16)xport_load_le16(b);
+    val0 = (sint16)(memcpy(&wire_halfword_1, a, sizeof(wire_halfword_1)), wire_halfword_1);
+    val1 = (sint16)(memcpy(&wire_halfword_2, b, sizeof(wire_halfword_2)), wire_halfword_2);
     left.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(b + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_3, a + 2, sizeof(wire_halfword_3)), wire_halfword_3);
+    val1 = (sint16)(memcpy(&wire_halfword_4, b + 2, sizeof(wire_halfword_4)), wire_halfword_4);
     left.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(b + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_5, a + 4, sizeof(wire_halfword_5)), wire_halfword_5);
+    val1 = (sint16)(memcpy(&wire_halfword_6, b + 4, sizeof(wire_halfword_6)), wire_halfword_6);
     left.vz = val0 - val1;
-    val0 = (sint16)xport_load_le16(a);
+    val0 = (sint16)(memcpy(&wire_halfword_7, a, sizeof(wire_halfword_7)), wire_halfword_7);
     c = points + (uint32)(sint16)v2 * 6;
-    val1 = (sint16)xport_load_le16(c);
+    val1 = (sint16)(memcpy(&wire_halfword_8, c, sizeof(wire_halfword_8)), wire_halfword_8);
     right.vx = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 2);
-    val1 = (sint16)xport_load_le16(c + 2);
+    val0 = (sint16)(memcpy(&wire_halfword_9, a + 2, sizeof(wire_halfword_9)), wire_halfword_9);
+    val1 = (sint16)(memcpy(&wire_halfword_10, c + 2, sizeof(wire_halfword_10)), wire_halfword_10);
     right.vy = val0 - val1;
-    val0 = (sint16)xport_load_le16(a + 4);
-    val1 = (sint16)xport_load_le16(c + 4);
+    val0 = (sint16)(memcpy(&wire_halfword_11, a + 4, sizeof(wire_halfword_11)), wire_halfword_11);
+    val1 = (sint16)(memcpy(&wire_halfword_12, c + 4, sizeof(wire_halfword_12)), wire_halfword_12);
     right.vz = val0 - val1;
     OuterProduct0(&left, &right, &n);
     n.vx >>= 12;
@@ -880,6 +986,9 @@ static uint32 triangle_n(sint32 v0, sint32 v1, sint32 v2, SVECTOR *output)
 
 uint32 track_surface_n(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *output)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     sint32 node_idx;
     const uint8 *desc;
     uint32 type;
@@ -908,13 +1017,13 @@ uint32 track_surface_n(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *output)
     XASSERT(!(node_idx < 0 || (uint32)node_idx >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node_idx * 24;
     type = (desc)[0];
-    left_idx = xport_load_le16(desc + 4);
+    left_idx = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     offset = cell_rules[type].left_offset;
     lane = node->lane;
     lanes = (desc + 3)[0];
     left_idx += (uint32)offset + lane;
     node->left_vertex = (uint16)(left_idx);
-    right_idx = xport_load_le16(desc + 6);
+    right_idx = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     offset = cell_rules[type].right_offset;
     right_idx += (uint32)offset + lane;
     node->right_vertex = (uint16)(right_idx);
@@ -952,10 +1061,10 @@ uint32 track_surface_n(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *output)
         XASSERT(!(track_geometry.vertex_count < 2 || left_idx >= track_geometry.vertex_count || right_idx >= track_geometry.vertex_count - 1));
         point0 = points + left_idx * 6;
         point1 = points + right_idx * 6 + 6;
-        z0 = (sint16)xport_load_le16(point0 + 4);
-        x1 = (sint16)xport_load_le16(point1);
-        x0 = (sint16)xport_load_le16(point0);
-        z1 = (sint16)xport_load_le16(point1 + 4);
+        z0 = (sint16)(memcpy(&wire_halfword_3, point0 + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        x1 = (sint16)(memcpy(&wire_halfword_4, point1, sizeof(wire_halfword_4)), wire_halfword_4);
+        x0 = (sint16)(memcpy(&wire_halfword_5, point0, sizeof(wire_halfword_5)), wire_halfword_5);
+        z1 = (sint16)(memcpy(&wire_halfword_6, point1 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
         cross = (relative_z - (uint32)z0) * (uint32)(x1 - x0);
         cross -= (relative_x - (uint32)x0) * (uint32)(z1 - z0);
         action = (sint32)cross > 0 ? 1 : -1;
@@ -968,6 +1077,9 @@ uint32 track_surface_n(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *output)
 
 void track_geometry_init(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const SCENE_TRACK_IMAGE *image = &scene_track_image;
     const uint8 *wire;
     TRACK_BRANCH_MAP *branches = NULL;
@@ -998,9 +1110,9 @@ void track_geometry_init(void)
         for (branch_idx = 0; branch_idx < branch_count; ++branch_idx)
         {
             wire = image->bytes + geometry_offset + 24 + branch_idx * 6;
-            branches[branch_idx].branch_first = xport_load_le16(wire);
-            branches[branch_idx].branch_last = xport_load_le16(wire + 2);
-            branches[branch_idx].main_first = xport_load_le16(wire + 4);
+            branches[branch_idx].branch_first = (memcpy(&wire_halfword_1, wire, sizeof(wire_halfword_1)), wire_halfword_1);
+            branches[branch_idx].branch_last = (memcpy(&wire_halfword_2, wire + 2, sizeof(wire_halfword_2)), wire_halfword_2);
+            branches[branch_idx].main_first = (memcpy(&wire_halfword_3, wire + 4, sizeof(wire_halfword_3)), wire_halfword_3);
         }
     }
     free(track_geometry.branches);
@@ -1012,8 +1124,8 @@ void track_geometry_init(void)
     track_geometry.main_node_count = count;
     track_geometry.node_count = extra;
     track_geometry.node_bytes[0] = 9;
-    xport_store_le16(track_geometry.node_bytes + 10, (uint16)(count - 1));
-    xport_store_le16(track_geometry.node_bytes + track_geometry.main_node_count * 24 - 16, 0);
+    (wire_halfword_4 = (uint16)((uint16)(count - 1)), memcpy(track_geometry.node_bytes + 10, &wire_halfword_4, sizeof(wire_halfword_4)));
+    (wire_halfword_5 = (uint16)(0), memcpy(track_geometry.node_bytes + track_geometry.main_node_count * 24 - 16, &wire_halfword_5, sizeof(wire_halfword_5)));
     track_geometry.node_bytes[track_geometry.main_node_count * 24 - 24] = 10;
 }
 
@@ -1113,6 +1225,9 @@ uint32 track_normalize_location(TRACK_LOCATION *location)
 
 uint32 track_lateral_fraction(sint32 node, const VEC3 *pos)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const uint8 *desc;
     uint32 idx;
     const uint8 *points;
@@ -1138,7 +1253,7 @@ uint32 track_lateral_fraction(sint32 node, const VEC3 *pos)
     FUNCTION_MARKER(0x8004DA54, "SLUS_006.10");
     XASSERT(!(node < 0 || (uint32)node >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node * 24;
-    idx = xport_load_le16(desc + 6);
+    idx = (memcpy(&wire_halfword_1, desc + 6, sizeof(wire_halfword_1)), wire_halfword_1);
     points = track_geometry.vertex_bytes;
     type = (desc)[0];
     lanes = (desc + 3)[0];
@@ -1146,14 +1261,14 @@ uint32 track_lateral_fraction(sint32 node, const VEC3 *pos)
     XASSERT(!(idx >= track_geometry.vertex_count));
     point0 = points + idx * 6;
     idx += lanes & 15;
-    x0 = (sint16)xport_load_le16(point0);
+    x0 = (sint16)(memcpy(&wire_halfword_2, point0, sizeof(wire_halfword_2)), wire_halfword_2);
     idx += extra;
     XASSERT(!(idx >= track_geometry.vertex_count));
     point1 = points + idx * 6;
-    x1 = (sint16)xport_load_le16(point1);
+    x1 = (sint16)(memcpy(&wire_halfword_3, point1, sizeof(wire_halfword_3)), wire_halfword_3);
     dx = x1 - x0;
-    z1 = (sint16)xport_load_le16(point1 + 4);
-    z0 = (sint16)xport_load_le16(point0 + 4);
+    z1 = (sint16)(memcpy(&wire_halfword_4, point1 + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+    z0 = (sint16)(memcpy(&wire_halfword_5, point0 + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     dz = z1 - z0;
     memcpy(&base_x, desc + 12, sizeof(base_x));
     x = pos->x;
@@ -1192,6 +1307,9 @@ uint32 track_surface_material(const TRACK_LOCATION *node)
 
 uint32 track_lateral_distance(sint32 node, uint32 val, uint32 kind)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const uint8 *desc;
     uint32 idx0;
     const uint8 *points;
@@ -1211,7 +1329,7 @@ uint32 track_lateral_distance(sint32 node, uint32 val, uint32 kind)
     FUNCTION_MARKER(0x8004DBE8, "SLUS_006.10");
     XASSERT(!(node < 0 || (uint32)node >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node * 24;
-    idx0 = xport_load_le16(desc + 6);
+    idx0 = (memcpy(&wire_halfword_1, desc + 6, sizeof(wire_halfword_1)), wire_halfword_1);
     points = track_geometry.vertex_bytes;
     type = (desc)[0];
     lanes = (desc + 3)[0];
@@ -1220,11 +1338,11 @@ uint32 track_lateral_distance(sint32 node, uint32 val, uint32 kind)
     XASSERT(!(idx0 >= track_geometry.vertex_count || idx1 >= track_geometry.vertex_count));
     point0 = points + idx0 * 6;
     point1 = points + idx1 * 6;
-    a = (sint16)xport_load_le16(point1);
-    b = (sint16)xport_load_le16(point0);
+    a = (sint16)(memcpy(&wire_halfword_2, point1, sizeof(wire_halfword_2)), wire_halfword_2);
+    b = (sint16)(memcpy(&wire_halfword_3, point0, sizeof(wire_halfword_3)), wire_halfword_3);
     x = (sint32)((uint32)(a - b) * difference) / 256;
-    a = (sint16)xport_load_le16(point1 + 4);
-    b = (sint16)xport_load_le16(point0 + 4);
+    a = (sint16)(memcpy(&wire_halfword_4, point1 + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+    b = (sint16)(memcpy(&wire_halfword_5, point0 + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     z = (sint32)((uint32)(a - b) * difference) / 256;
     result = fixed_sqrt((uint32)x * (uint32)x + (uint32)z * (uint32)z);
     return (sint32)val < (sint32)kind ? 0 - result : result;

@@ -114,6 +114,9 @@ typedef struct CAR_TUNING_MODIFIERS
 
 static uint32 init_race_timing(CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
 
     uint32 slot;
@@ -139,9 +142,9 @@ static uint32 init_race_timing(CAR_STATE *car)
         if (mode == 0 || mode == 1)
         {
             multiplier = mode == 0 ? 12 : 11;
-            val = xport_load_le16(table + 2);
+            val = (memcpy(&wire_halfword_1, table + 2, sizeof(wire_halfword_1)), wire_halfword_1);
             count = (sint32)table[0] - 1;
-            xport_store_le16(table + 2, (uint16)(val * multiplier / 10));
+            (wire_halfword_2 = (uint16)((uint16)(val * multiplier / 10)), memcpy(table + 2, &wire_halfword_2, sizeof(wire_halfword_2)));
             if (count > 0)
             {
                 idx = 0;
@@ -149,8 +152,8 @@ static uint32 init_race_timing(CAR_STATE *car)
                 do
                 {
                     XASSERT(!(scene_level_image.size < 8 || (size_t)(cursor - scene_level_image.bytes) > scene_level_image.size - 8));
-                    val = xport_load_le16(cursor + 6);
-                    xport_store_le16(cursor + 6, (uint16)(val * multiplier / 10));
+                    val = (memcpy(&wire_halfword_3, cursor + 6, sizeof(wire_halfword_3)), wire_halfword_3);
+                    (wire_halfword_4 = (uint16)((uint16)(val * multiplier / 10)), memcpy(cursor + 6, &wire_halfword_4, sizeof(wire_halfword_4)));
                     count = (sint32)table[0] - 1;
                     ++idx;
                     cursor += 4;
@@ -158,7 +161,7 @@ static uint32 init_race_timing(CAR_STATE *car)
             }
         }
     }
-    val = xport_load_le16(table + 2);
+    val = (memcpy(&wire_halfword_5, table + 2, sizeof(wire_halfword_5)), wire_halfword_5);
     car->completed_laps = (uint8)(0);
     car->finish_time = (uint32)(0);
     car->race_stats.elapsed_ticks = (uint16)(0);
@@ -1031,6 +1034,15 @@ uint32 car_load_environment(CAR_STATE *car_state, uint32 selection)
 
 void car_update_lighting(CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15, wire_halfword_16;
+    uint16 wire_halfword_17, wire_halfword_18, wire_halfword_19, wire_halfword_20;
+    uint16 wire_halfword_21, wire_halfword_22, wire_halfword_23, wire_halfword_24;
+    uint16 wire_halfword_25, wire_halfword_26, wire_halfword_27, wire_halfword_28;
+    uint16 wire_halfword_29;
+
     uint32 wire_word_16;
     VEC3_16 light_dir;
     CAR_LIGHTING_WORK work;
@@ -1068,14 +1080,14 @@ void car_update_lighting(CAR_STATE *car)
     XASSERT(!(desc_offset > car_lighting_zones.size || car_lighting_zones.size - desc_offset < 32));
     desc = car_lighting_zones.bytes + desc_offset;
     node = (sint16)car->track_location.node;
-    while (node < (sint16)xport_load_le16(desc))
+    while (node < (sint16)(memcpy(&wire_halfword_1, desc, sizeof(wire_halfword_1)), wire_halfword_1))
     {
         XASSERT(!(desc - (car_lighting_zones.bytes + car_lighting_zones.offset) < 32));
         desc -= 32;
         val = car->lighting_zone;
         car->lighting_zone = (uint8)(val - 1);
     }
-    while ((sint16)xport_load_le16(desc + 2) < node)
+    while ((sint16)(memcpy(&wire_halfword_2, desc + 2, sizeof(wire_halfword_2)), wire_halfword_2) < node)
     {
         val = car->lighting_zone;
         XASSERT(!(car_lighting_zones.count - (uint32)(desc - (car_lighting_zones.bytes + car_lighting_zones.offset)) / 32 < 2));
@@ -1095,25 +1107,25 @@ void car_update_lighting(CAR_STATE *car)
         r = desc[12];
         g = desc[13];
         b = desc[14];
-        light_dir.bits.x = xport_load_le16(desc + 4);
-        light_dir.bits.y = xport_load_le16(desc + 6);
-        light_dir.bits.z = xport_load_le16(desc + 8);
+        light_dir.bits.x = (memcpy(&wire_halfword_3, desc + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        light_dir.bits.y = (memcpy(&wire_halfword_4, desc + 6, sizeof(wire_halfword_4)), wire_halfword_4);
+        light_dir.bits.z = (memcpy(&wire_halfword_5, desc + 8, sizeof(wire_halfword_5)), wire_halfword_5);
         model_set_light(0, &light_dir, r, g, b);
-        light_dir.bits.x = xport_load_le16(desc + 4);
-        light_dir.bits.y = xport_load_le16(desc + 6);
-        light_dir.bits.z = xport_load_le16(desc + 8);
+        light_dir.bits.x = (memcpy(&wire_halfword_6, desc + 4, sizeof(wire_halfword_6)), wire_halfword_6);
+        light_dir.bits.y = (memcpy(&wire_halfword_7, desc + 6, sizeof(wire_halfword_7)), wire_halfword_7);
+        light_dir.bits.z = (memcpy(&wire_halfword_8, desc + 8, sizeof(wire_halfword_8)), wire_halfword_8);
         model_set_light(1, &light_dir, 0, 0, 0);
-        light_dir.bits.x = xport_load_le16(desc + 4);
-        light_dir.bits.y = xport_load_le16(desc + 6);
-        light_dir.bits.z = xport_load_le16(desc + 8);
+        light_dir.bits.x = (memcpy(&wire_halfword_9, desc + 4, sizeof(wire_halfword_9)), wire_halfword_9);
+        light_dir.bits.y = (memcpy(&wire_halfword_10, desc + 6, sizeof(wire_halfword_10)), wire_halfword_10);
+        light_dir.bits.z = (memcpy(&wire_halfword_11, desc + 8, sizeof(wire_halfword_11)), wire_halfword_11);
         model_set_light(2, &light_dir, 0, 0, 0);
         model_apply_light_matrix(&car->transform);
         return;
     }
     if (kind == 3)
     {
-        span = (sint16)xport_load_le16(desc + 2);
-        origin = (sint16)xport_load_le16(desc);
+        span = (sint16)(memcpy(&wire_halfword_12, desc + 2, sizeof(wire_halfword_12)), wire_halfword_12);
+        origin = (sint16)(memcpy(&wire_halfword_13, desc, sizeof(wire_halfword_13)), wire_halfword_13);
         span = span - origin + 1;
         if (node - origin < span / 2)
             blend_lighting_start(car, desc, (sint32)((uint32)span << 9));
@@ -1123,17 +1135,17 @@ void car_update_lighting(CAR_STATE *car)
     }
     if (kind != 1 && kind != 2)
         return;
-    if (node - (sint16)xport_load_le16(desc) < 3)
+    if (node - (sint16)(memcpy(&wire_halfword_14, desc, sizeof(wire_halfword_14)), wire_halfword_14) < 3)
     {
         blend_lighting_start(car, desc, 2048);
         return;
     }
-    if ((sint16)xport_load_le16(desc + 2) - node < 3)
+    if ((sint16)(memcpy(&wire_halfword_15, desc + 2, sizeof(wire_halfword_15)), wire_halfword_15) - node < 3)
     {
         blend_lighting_end(car, desc, 2048);
         return;
     }
-    origin = (sint16)xport_load_le16(desc + 20);
+    origin = (sint16)(memcpy(&wire_halfword_16, desc + 20, sizeof(wire_halfword_16)), wire_halfword_16);
     step = desc[25];
     rounded = fixed_divide_checked(node - origin + (sint32)(step >> 1), step);
     rounded = ((uint32)rounded * step + (uint32)origin);
@@ -1151,7 +1163,7 @@ void car_update_lighting(CAR_STATE *car)
         }
         seg = segs + (uint32)sampled_node * 24;
         far_idx = (seg + 3)[0] & 15;
-        vertex_idx = xport_load_le16(seg + 4);
+        vertex_idx = (memcpy(&wire_halfword_17, seg + 4, sizeof(wire_halfword_17)), wire_halfword_17);
         b = desc[14];
         vertices = track_geometry.vertex_bytes;
         far_idx += vertex_idx;
@@ -1165,10 +1177,10 @@ void car_update_lighting(CAR_STATE *car)
             for (component = 0; component < 3; ++component)
             {
                 memcpy(&val, seg + 12 + component * 4, sizeof(val));
-                val += xport_load_le16(vertex + component * 2);
+                val += (memcpy(&wire_halfword_18, vertex + component * 2, sizeof(wire_halfword_18)), wire_halfword_18);
                 pos = car->pos.u[component];
                 if (light == 0 && component == 0)
-                    height = xport_load_le16(desc + 22);
+                    height = (memcpy(&wire_halfword_19, desc + 22, sizeof(wire_halfword_19)), wire_halfword_19);
                 val -= (uint32)((sint32)pos / 256);
                 if (component == 1)
                     val += height;
@@ -1190,9 +1202,9 @@ void car_update_lighting(CAR_STATE *car)
         g = desc[17];
         b = desc[18];
         model_set_back_color(r, g, b);
-        light_dir.bits.x = xport_load_le16(desc + 4);
-        light_dir.bits.y = xport_load_le16(desc + 6);
-        light_dir.bits.z = xport_load_le16(desc + 8);
+        light_dir.bits.x = (memcpy(&wire_halfword_20, desc + 4, sizeof(wire_halfword_20)), wire_halfword_20);
+        light_dir.bits.y = (memcpy(&wire_halfword_21, desc + 6, sizeof(wire_halfword_21)), wire_halfword_21);
+        light_dir.bits.z = (memcpy(&wire_halfword_22, desc + 8, sizeof(wire_halfword_22)), wire_halfword_22);
         model_set_light(2, &light_dir, 0, 0, 0);
         model_apply_light_matrix(&car->transform);
         return;
@@ -1204,7 +1216,7 @@ void car_update_lighting(CAR_STATE *car)
 
     work.g = g;
     b = desc[14];
-    height = xport_load_le16(desc + 22);
+    height = (memcpy(&wire_halfword_23, desc + 22, sizeof(wire_halfword_23)), wire_halfword_23);
     if (selector < 3)
     {
         vertices = NULL;
@@ -1225,13 +1237,13 @@ void car_update_lighting(CAR_STATE *car)
             seg = segs + (uint32)sampled_node * 24;
             if (selector == 2)
             {
-                far_idx = xport_load_le16(seg + 6) - 1;
-                vertex_idx = xport_load_le16(seg + 4);
+                far_idx = (memcpy(&wire_halfword_24, seg + 6, sizeof(wire_halfword_24)), wire_halfword_24) - 1;
+                vertex_idx = (memcpy(&wire_halfword_25, seg + 4, sizeof(wire_halfword_25)), wire_halfword_25);
             }
             else if (selector == 1)
-                vertex_idx = xport_load_le16(seg + 6) - 1;
+                vertex_idx = (memcpy(&wire_halfword_26, seg + 6, sizeof(wire_halfword_26)), wire_halfword_26) - 1;
             else
-                vertex_idx = xport_load_le16(seg + 4);
+                vertex_idx = (memcpy(&wire_halfword_27, seg + 4, sizeof(wire_halfword_27)), wire_halfword_27);
             if (light == 0)
                 vertices = track_geometry.vertex_bytes;
             XASSERT(!(vertex_idx >= track_geometry.vertex_count));
@@ -1241,9 +1253,9 @@ void car_update_lighting(CAR_STATE *car)
             point = &work.points[light];
             for (component = 0; component < 3; ++component)
             {
-                scaled = (sint16)xport_load_le16(vertex + component * 2);
+                scaled = (sint16)(memcpy(&wire_halfword_28, vertex + component * 2, sizeof(wire_halfword_28)), wire_halfword_28);
                 if (selector == 2)
-                    scaled += (sint16)xport_load_le16(other_vertex + component * 2);
+                    scaled += (sint16)(memcpy(&wire_halfword_29, other_vertex + component * 2, sizeof(wire_halfword_29)), wire_halfword_29);
                 memcpy(&val, seg + 12 + component * 4, sizeof(val));
                 if (selector == 2)
                     scaled /= 2;
@@ -1537,6 +1549,9 @@ static void copy_car_metadata(const uint8 *data, uint32 capacity, uint32 slot)
 
 void car_load_race_models(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+
     uint32 pal_y;
     const uint8 *tex_carrier;
     MODEL_TEXTURE_ATTRIBUTES local_tex;
@@ -1670,8 +1685,8 @@ void car_load_race_models(void)
                 tex_carrier = tex_find("Hicar");
                 primary_tex.attributes = NULL;
                 primary_tex.resource = tex_carrier;
-                tpage = xport_load_le16(tex_carrier + 8);
-                clut = xport_load_le16(tex_carrier + 10);
+                tpage = (memcpy(&wire_halfword_1, tex_carrier + 8, sizeof(wire_halfword_1)), wire_halfword_1);
+                clut = (memcpy(&wire_halfword_2, tex_carrier + 10, sizeof(wire_halfword_2)), wire_halfword_2);
                 x = (tpage << 6) & 0x3FF;
                 y = ((tpage << 4) & 0x100) + ((tpage >> 2) & 0x200);
                 clut_x = (clut & 63) << 4;
@@ -1721,7 +1736,7 @@ void car_load_race_models(void)
                 const SVECTOR *vertices = NULL;
                 XASSERT(!(src_offset > work_size || work_size - src_offset < 48));
                 memcpy(&vertex_offset, work_bytes + src_offset + 44, sizeof(vertex_offset));
-                vertex_count = (sint16)xport_load_le16(work_bytes + src_offset + 14);
+                vertex_count = (sint16)(memcpy(&wire_halfword_3, work_bytes + src_offset + 14, sizeof(wire_halfword_3)), wire_halfword_3);
                 if (vertex_count > 0)
                 {
                     vertex_bytes = (uint32)(vertex_count - 1) * sizeof(SVECTOR) + 3 * sizeof(sint16);
@@ -1782,8 +1797,8 @@ void car_load_race_models(void)
             if (slot == master)
             {
                 tex_carrier = tex_find("racehub");
-                clut = xport_load_le16(tex_carrier + 10);
-                tpage = xport_load_le16(tex_carrier + 8);
+                clut = (memcpy(&wire_halfword_4, tex_carrier + 10, sizeof(wire_halfword_4)), wire_halfword_4);
+                tpage = (memcpy(&wire_halfword_5, tex_carrier + 8, sizeof(wire_halfword_5)), wire_halfword_5);
                 u = tex_carrier[14];
                 variant = session_options.model_variant;
                 v = tex_carrier[15];
@@ -1833,7 +1848,7 @@ void car_load_race_models(void)
                 const SVECTOR *vertices = NULL;
                 XASSERT(!(src_offset > work_size || work_size - src_offset < 48));
                 memcpy(&vertex_offset, work_bytes + src_offset + 44, sizeof(vertex_offset));
-                vertex_count = (sint16)xport_load_le16(work_bytes + src_offset + 14);
+                vertex_count = (sint16)(memcpy(&wire_halfword_6, work_bytes + src_offset + 14, sizeof(wire_halfword_6)), wire_halfword_6);
                 if (vertex_count > 0)
                 {
                     vertex_bytes = (uint32)(vertex_count - 1) * sizeof(SVECTOR) + 3 * sizeof(sint16);
@@ -1898,8 +1913,8 @@ void car_load_race_models(void)
             strcpy(model_tex_name, tex_name);
             model_tex_name[0] = (char)(uint8)(tex_number + 49);
             tex_carrier = tex_find(model_tex_name);
-            tpage = xport_load_le16(tex_carrier + 8);
-            clut = xport_load_le16(tex_carrier + 10);
+            tpage = (memcpy(&wire_halfword_7, tex_carrier + 8, sizeof(wire_halfword_7)), wire_halfword_7);
+            clut = (memcpy(&wire_halfword_8, tex_carrier + 10, sizeof(wire_halfword_8)), wire_halfword_8);
             u = tex_carrier[14];
             v = tex_carrier[15];
             pal_y = (clut >> 6) & 255;
@@ -1969,6 +1984,12 @@ void car_init_lighting_zones(void)
 
 static void blend_lighting_end(CAR_STATE *car, const uint8 *desc, sint32 width)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15, wire_halfword_16;
+    uint16 wire_halfword_17, wire_halfword_18;
+
     VEC3_16 light_dir;
     SVECTOR n;
     const uint8 *rec, *first, *last, *pool, *neighbor;
@@ -1979,34 +2000,34 @@ static void blend_lighting_end(CAR_STATE *car, const uint8 *desc, sint32 width)
     sint16 dx, dz;
 
     FUNCTION_MARKER(0x8003110C, "SLUS_006.10");
-    val = (sint16)xport_load_le16(desc + 2);
+    val = (sint16)(memcpy(&wire_halfword_1, desc + 2, sizeof(wire_halfword_1)), wire_halfword_1);
     pool = track_geometry.node_bytes;
     node_idx = val + 1;
     XASSERT(!(node_idx >= track_geometry.node_count));
     rec = pool + node_idx * 24;
-    last_idx = xport_load_le16(rec + 6);
-    first_idx = xport_load_le16(rec + 4);
+    last_idx = (memcpy(&wire_halfword_2, rec + 6, sizeof(wire_halfword_2)), wire_halfword_2);
+    first_idx = (memcpy(&wire_halfword_3, rec + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     pool = track_geometry.vertex_bytes;
     XASSERT(!(last_idx == 0 || last_idx - 1 >= track_geometry.vertex_count || first_idx >= track_geometry.vertex_count));
     last = pool + (last_idx - 1) * 6;
     first = pool + first_idx * 6;
-    val = xport_load_le16(first + 4);
-    other = xport_load_le16(last + 4);
+    val = (memcpy(&wire_halfword_4, first + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+    other = (memcpy(&wire_halfword_5, last + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     n.vy = 0;
     n.vx = (sint16)(val - other);
-    val = xport_load_le16(last);
-    other = xport_load_le16(first);
+    val = (memcpy(&wire_halfword_6, last, sizeof(wire_halfword_6)), wire_halfword_6);
+    other = (memcpy(&wire_halfword_7, first, sizeof(wire_halfword_7)), wire_halfword_7);
     n.vz = (sint16)(val - other);
     n.pad = 0;
     VectorNormalSS(&n, &n);
     neighbor = desc == car_lighting_zones.bytes + car_lighting_zones.offset + (car_lighting_zones.count - 1) * 32 ? car_lighting_zones.bytes + car_lighting_zones.offset : desc + 32;
     coord = car->pos.x;
-    val = xport_load_le16(last);
+    val = (memcpy(&wire_halfword_8, last, sizeof(wire_halfword_8)), wire_halfword_8);
     memcpy(&origin, rec + 12, sizeof(origin));
     dx = ((uint32)(coord / 256) - val - origin);
     coord = car->pos.z;
     product = (uint32)(sint32)n.vx * (uint32)(sint32)dx;
-    val = xport_load_le16(last + 4);
+    val = (memcpy(&wire_halfword_9, last + 4, sizeof(wire_halfword_9)), wire_halfword_9);
     memcpy(&origin, rec + 20, sizeof(origin));
     dz = ((uint32)(coord / 256) - val - origin);
     product += (uint32)(sint32)n.vz * (uint32)(sint32)dz;
@@ -2031,23 +2052,29 @@ static void blend_lighting_end(CAR_STATE *car, const uint8 *desc, sint32 width)
         product = val * far_weight;
         light[i] = (uint32)fixed_divide_checked((sint32)product, width);
     }
-    light_dir.bits.x = xport_load_le16(neighbor + 4);
-    light_dir.bits.y = xport_load_le16(neighbor + 6);
-    light_dir.bits.z = xport_load_le16(neighbor + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_10, neighbor + 4, sizeof(wire_halfword_10)), wire_halfword_10);
+    light_dir.bits.y = (memcpy(&wire_halfword_11, neighbor + 6, sizeof(wire_halfword_11)), wire_halfword_11);
+    light_dir.bits.z = (memcpy(&wire_halfword_12, neighbor + 8, sizeof(wire_halfword_12)), wire_halfword_12);
     model_set_light(0, &light_dir, light[0], light[1], light[2]);
-    light_dir.bits.x = xport_load_le16(desc + 4);
-    light_dir.bits.y = xport_load_le16(desc + 6);
-    light_dir.bits.z = xport_load_le16(desc + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_13, desc + 4, sizeof(wire_halfword_13)), wire_halfword_13);
+    light_dir.bits.y = (memcpy(&wire_halfword_14, desc + 6, sizeof(wire_halfword_14)), wire_halfword_14);
+    light_dir.bits.z = (memcpy(&wire_halfword_15, desc + 8, sizeof(wire_halfword_15)), wire_halfword_15);
     model_set_light(1, &light_dir, 0, 0, 0);
-    light_dir.bits.x = xport_load_le16(desc + 4);
-    light_dir.bits.y = xport_load_le16(desc + 6);
-    light_dir.bits.z = xport_load_le16(desc + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_16, desc + 4, sizeof(wire_halfword_16)), wire_halfword_16);
+    light_dir.bits.y = (memcpy(&wire_halfword_17, desc + 6, sizeof(wire_halfword_17)), wire_halfword_17);
+    light_dir.bits.z = (memcpy(&wire_halfword_18, desc + 8, sizeof(wire_halfword_18)), wire_halfword_18);
     model_set_light(2, &light_dir, 0, 0, 0);
     model_apply_light_matrix(&car->transform);
 }
 
 static void blend_lighting_start(CAR_STATE *car, const uint8 *desc, sint32 width)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15, wire_halfword_16;
+    uint16 wire_halfword_17, wire_halfword_18;
+
     VEC3_16 light_dir;
     SVECTOR n;
     const uint8 *rec, *first, *last, *pool, *neighbor;
@@ -2058,34 +2085,34 @@ static void blend_lighting_start(CAR_STATE *car, const uint8 *desc, sint32 width
     sint16 dx, dz;
 
     FUNCTION_MARKER(0x80030D68, "SLUS_006.10");
-    val = (sint16)xport_load_le16(desc);
+    val = (sint16)(memcpy(&wire_halfword_1, desc, sizeof(wire_halfword_1)), wire_halfword_1);
     pool = track_geometry.node_bytes;
     node_idx = val;
     XASSERT(!(node_idx >= track_geometry.node_count));
     rec = pool + node_idx * 24;
-    last_idx = xport_load_le16(rec + 6);
-    first_idx = xport_load_le16(rec + 4);
+    last_idx = (memcpy(&wire_halfword_2, rec + 6, sizeof(wire_halfword_2)), wire_halfword_2);
+    first_idx = (memcpy(&wire_halfword_3, rec + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     pool = track_geometry.vertex_bytes;
     XASSERT(!(last_idx == 0 || last_idx - 1 >= track_geometry.vertex_count || first_idx >= track_geometry.vertex_count));
     last = pool + (last_idx - 1) * 6;
     first = pool + first_idx * 6;
-    val = xport_load_le16(first + 4);
-    other = xport_load_le16(last + 4);
+    val = (memcpy(&wire_halfword_4, first + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+    other = (memcpy(&wire_halfword_5, last + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     n.vy = 0;
     n.vx = (sint16)(val - other);
-    val = xport_load_le16(last);
-    other = xport_load_le16(first);
+    val = (memcpy(&wire_halfword_6, last, sizeof(wire_halfword_6)), wire_halfword_6);
+    other = (memcpy(&wire_halfword_7, first, sizeof(wire_halfword_7)), wire_halfword_7);
     n.vz = (sint16)(val - other);
     n.pad = 0;
     VectorNormalSS(&n, &n);
     neighbor = desc == car_lighting_zones.bytes + car_lighting_zones.offset ? desc + (car_lighting_zones.count - 1) * 32 : desc - 32;
     coord = car->pos.x;
-    val = xport_load_le16(last);
+    val = (memcpy(&wire_halfword_8, last, sizeof(wire_halfword_8)), wire_halfword_8);
     memcpy(&origin, rec + 12, sizeof(origin));
     dx = ((uint32)(coord / 256) - val - origin);
     coord = car->pos.z;
     product = (uint32)(sint32)n.vx * (uint32)(sint32)dx;
-    val = xport_load_le16(last + 4);
+    val = (memcpy(&wire_halfword_9, last + 4, sizeof(wire_halfword_9)), wire_halfword_9);
     memcpy(&origin, rec + 20, sizeof(origin));
     dz = ((uint32)(coord / 256) - val - origin);
     product += (uint32)(sint32)n.vz * (uint32)(sint32)dz;
@@ -2110,17 +2137,17 @@ static void blend_lighting_start(CAR_STATE *car, const uint8 *desc, sint32 width
         product = val * far_weight;
         light[i] = (uint32)fixed_divide_checked((sint32)product, width);
     }
-    light_dir.bits.x = xport_load_le16(neighbor + 4);
-    light_dir.bits.y = xport_load_le16(neighbor + 6);
-    light_dir.bits.z = xport_load_le16(neighbor + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_10, neighbor + 4, sizeof(wire_halfword_10)), wire_halfword_10);
+    light_dir.bits.y = (memcpy(&wire_halfword_11, neighbor + 6, sizeof(wire_halfword_11)), wire_halfword_11);
+    light_dir.bits.z = (memcpy(&wire_halfword_12, neighbor + 8, sizeof(wire_halfword_12)), wire_halfword_12);
     model_set_light(0, &light_dir, light[0], light[1], light[2]);
-    light_dir.bits.x = xport_load_le16(desc + 4);
-    light_dir.bits.y = xport_load_le16(desc + 6);
-    light_dir.bits.z = xport_load_le16(desc + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_13, desc + 4, sizeof(wire_halfword_13)), wire_halfword_13);
+    light_dir.bits.y = (memcpy(&wire_halfword_14, desc + 6, sizeof(wire_halfword_14)), wire_halfword_14);
+    light_dir.bits.z = (memcpy(&wire_halfword_15, desc + 8, sizeof(wire_halfword_15)), wire_halfword_15);
     model_set_light(1, &light_dir, 0, 0, 0);
-    light_dir.bits.x = xport_load_le16(desc + 4);
-    light_dir.bits.y = xport_load_le16(desc + 6);
-    light_dir.bits.z = xport_load_le16(desc + 8);
+    light_dir.bits.x = (memcpy(&wire_halfword_16, desc + 4, sizeof(wire_halfword_16)), wire_halfword_16);
+    light_dir.bits.y = (memcpy(&wire_halfword_17, desc + 6, sizeof(wire_halfword_17)), wire_halfword_17);
+    light_dir.bits.z = (memcpy(&wire_halfword_18, desc + 8, sizeof(wire_halfword_18)), wire_halfword_18);
     model_set_light(2, &light_dir, 0, 0, 0);
     model_apply_light_matrix(&car->transform);
 }
@@ -2157,6 +2184,14 @@ sint32 car_heading_from_components(sint32 x, sint32 z)
 
 static sint32 track_heading(const TRACK_LOCATION *location, sint32 fallback_lane, sint32 fallback_y)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13, wire_halfword_14, wire_halfword_15, wire_halfword_16;
+    uint16 wire_halfword_17, wire_halfword_18, wire_halfword_19, wire_halfword_20;
+    uint16 wire_halfword_21, wire_halfword_22, wire_halfword_23, wire_halfword_24;
+    uint16 wire_halfword_25, wire_halfword_26;
+
     sint32 node;
     const uint8 *desc;
     uint32 left_idx;
@@ -2176,9 +2211,9 @@ static sint32 track_heading(const TRACK_LOCATION *location, sint32 fallback_lane
     node = (sint16)location->node;
     XASSERT(!(node < 0 || (uint32)node >= track_geometry.node_count));
     desc = track_geometry.node_bytes + (uint32)node * 24;
-    left_idx = xport_load_le16(desc + 4);
+    left_idx = (memcpy(&wire_halfword_1, desc + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     points = track_geometry.vertex_bytes;
-    right_idx = xport_load_le16(desc + 6);
+    right_idx = (memcpy(&wire_halfword_2, desc + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     type = desc[0];
     switch (type)
     {
@@ -2188,15 +2223,15 @@ static sint32 track_heading(const TRACK_LOCATION *location, sint32 fallback_lane
             XASSERT(!(left_idx + 2 > track_geometry.vertex_count || right_idx + 2 > track_geometry.vertex_count));
             left_points = points + left_idx * 6;
             right_points = points + right_idx * 6;
-            a = (sint16)xport_load_le16(left_points);
-            b = (sint16)xport_load_le16(right_points);
-            c = (sint16)xport_load_le16(left_points + 6);
-            d = (sint16)xport_load_le16(right_points + 6);
+            a = (sint16)(memcpy(&wire_halfword_3, left_points, sizeof(wire_halfword_3)), wire_halfword_3);
+            b = (sint16)(memcpy(&wire_halfword_4, right_points, sizeof(wire_halfword_4)), wire_halfword_4);
+            c = (sint16)(memcpy(&wire_halfword_5, left_points + 6, sizeof(wire_halfword_5)), wire_halfword_5);
+            d = (sint16)(memcpy(&wire_halfword_6, right_points + 6, sizeof(wire_halfword_6)), wire_halfword_6);
             x = a - b + c - d;
-            a = (sint16)xport_load_le16(left_points + 4);
-            b = (sint16)xport_load_le16(right_points + 4);
-            c = (sint16)xport_load_le16(left_points + 10);
-            d = (sint16)xport_load_le16(right_points + 10);
+            a = (sint16)(memcpy(&wire_halfword_7, left_points + 4, sizeof(wire_halfword_7)), wire_halfword_7);
+            b = (sint16)(memcpy(&wire_halfword_8, right_points + 4, sizeof(wire_halfword_8)), wire_halfword_8);
+            c = (sint16)(memcpy(&wire_halfword_9, left_points + 10, sizeof(wire_halfword_9)), wire_halfword_9);
+            d = (sint16)(memcpy(&wire_halfword_10, right_points + 10, sizeof(wire_halfword_10)), wire_halfword_10);
             z = a - b + c - d;
             break;
         case 3:
@@ -2204,15 +2239,15 @@ static sint32 track_heading(const TRACK_LOCATION *location, sint32 fallback_lane
             XASSERT(!(left_idx + 2 > track_geometry.vertex_count || right_idx + 3 > track_geometry.vertex_count));
             left_points = points + left_idx * 6;
             right_points = points + right_idx * 6;
-            a = (sint16)xport_load_le16(left_points);
-            b = (sint16)xport_load_le16(right_points + 6);
-            c = (sint16)xport_load_le16(left_points + 6);
-            d = (sint16)xport_load_le16(right_points + 12);
+            a = (sint16)(memcpy(&wire_halfword_11, left_points, sizeof(wire_halfword_11)), wire_halfword_11);
+            b = (sint16)(memcpy(&wire_halfword_12, right_points + 6, sizeof(wire_halfword_12)), wire_halfword_12);
+            c = (sint16)(memcpy(&wire_halfword_13, left_points + 6, sizeof(wire_halfword_13)), wire_halfword_13);
+            d = (sint16)(memcpy(&wire_halfword_14, right_points + 12, sizeof(wire_halfword_14)), wire_halfword_14);
             x = a - b + c - d;
-            a = (sint16)xport_load_le16(left_points + 4);
-            b = (sint16)xport_load_le16(right_points + 10);
-            c = (sint16)xport_load_le16(left_points + 10);
-            d = (sint16)xport_load_le16(right_points + 16);
+            a = (sint16)(memcpy(&wire_halfword_15, left_points + 4, sizeof(wire_halfword_15)), wire_halfword_15);
+            b = (sint16)(memcpy(&wire_halfword_16, right_points + 10, sizeof(wire_halfword_16)), wire_halfword_16);
+            c = (sint16)(memcpy(&wire_halfword_17, left_points + 10, sizeof(wire_halfword_17)), wire_halfword_17);
+            d = (sint16)(memcpy(&wire_halfword_18, right_points + 16, sizeof(wire_halfword_18)), wire_halfword_18);
             z = a - b + c - d;
             break;
         case 6:
@@ -2220,15 +2255,15 @@ static sint32 track_heading(const TRACK_LOCATION *location, sint32 fallback_lane
             XASSERT(!(left_idx + 3 > track_geometry.vertex_count || right_idx + 2 > track_geometry.vertex_count));
             left_points = points + left_idx * 6;
             right_points = points + right_idx * 6;
-            a = (sint16)xport_load_le16(left_points + 6);
-            b = (sint16)xport_load_le16(right_points);
-            c = (sint16)xport_load_le16(left_points + 12);
-            d = (sint16)xport_load_le16(right_points + 6);
+            a = (sint16)(memcpy(&wire_halfword_19, left_points + 6, sizeof(wire_halfword_19)), wire_halfword_19);
+            b = (sint16)(memcpy(&wire_halfword_20, right_points, sizeof(wire_halfword_20)), wire_halfword_20);
+            c = (sint16)(memcpy(&wire_halfword_21, left_points + 12, sizeof(wire_halfword_21)), wire_halfword_21);
+            d = (sint16)(memcpy(&wire_halfword_22, right_points + 6, sizeof(wire_halfword_22)), wire_halfword_22);
             x = a - b + c - d;
-            a = (sint16)xport_load_le16(left_points + 10);
-            b = (sint16)xport_load_le16(right_points + 4);
-            c = (sint16)xport_load_le16(left_points + 16);
-            d = (sint16)xport_load_le16(right_points + 10);
+            a = (sint16)(memcpy(&wire_halfword_23, left_points + 10, sizeof(wire_halfword_23)), wire_halfword_23);
+            b = (sint16)(memcpy(&wire_halfword_24, right_points + 4, sizeof(wire_halfword_24)), wire_halfword_24);
+            c = (sint16)(memcpy(&wire_halfword_25, left_points + 16, sizeof(wire_halfword_25)), wire_halfword_25);
+            d = (sint16)(memcpy(&wire_halfword_26, right_points + 10, sizeof(wire_halfword_26)), wire_halfword_26);
             z = a - b + c - d;
             break;
         default:
@@ -2245,6 +2280,7 @@ uint32 car_place_on_track(uint32 slot, uint32 node, uint32 side, uint32 raised)
     TRACK_POSITION_RESULT pos;
 
     FUNCTION_MARKER(0x8004D984, "SLUS_006.10");
+    hd_car_reset(slot);
     car_states[(offset) / 864u].track_location.node = (uint16)(node);
     car_states[(offset) / 864u].track_location.lane = (uint8)(side);
     pos = track_place_location(&car_states[(offset) / 864u].track_location, &car_states[(offset) / 864u].pos);

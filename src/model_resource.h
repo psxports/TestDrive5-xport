@@ -9,7 +9,8 @@ typedef struct MODEL_HEADER
     uint8 format[8];
     uint16 radius;
     uint16 renderer;
-    uint8 reserved_0c[4];
+    sint16 ordering_bias;
+    uint16 visible_vertices;
     VEC3 position;
     VEC3 origin;
     uint8 reserved_28[4];

@@ -21,6 +21,7 @@ typedef struct CHASE_STATE
 extern CHASE_STATE chase_state;
 
 uint32 chase_draw_health(uint32 slot);
+void chase_draw_hd_health(uint32 slot);
 uint32 chase_draw_message(void);
 uint32 chase_draw_status(CAR_STATE *car);
 uint32 chase_decay_signal(void);

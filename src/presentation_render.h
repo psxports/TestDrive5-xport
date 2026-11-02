@@ -445,7 +445,6 @@ void presentation_show_loading(void);
 extern const char presentation_background_format[16];
 sint32 presentation_upload_background(void);
 void presentation_show_credits_legal_images(uint8 *buffer, uint32 capacity);
-uint32 presentation_upload_car_background(void);
 
 uint32 presentation_load_items(const PRESENTATION_RECORD_LIST *records);
 uint32 presentation_draw_items(void);

@@ -45,7 +45,6 @@ typedef struct CAR_SELECTION_STATE
     uint32 list_count;
     uint16 entries[44];
     uint32 retained_transition_code;
-    uint32 refresh_frames;
     uint32 banner_angle;
     uint32 banner_wiggle;
     uint32 sel_entry;

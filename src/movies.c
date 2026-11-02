@@ -14,6 +14,7 @@ static void play_sequence(uint32 mode)
     const char *path = mode ? "DATA/FEAR.STR" : "DATA/LOGO.STR";
 #endif
     sint32 result;
+    hd_suspend();
 
     /* The replaced executable normally restarts callbacks before playback */
     ResetCallback();

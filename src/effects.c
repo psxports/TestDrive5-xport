@@ -1,3 +1,4 @@
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -165,6 +166,8 @@ typedef struct EFFECT_STATE
 } EFFECT_STATE;
 
 static EFFECT_STATE effects;
+static VEC3 line_hd_previous[50];
+static uint8 line_hd_valid[50];
 
 EFFECT_TEXTURE effect_tex[8];
 
@@ -257,6 +260,47 @@ static uint32 update_visibility(void)
     return 0;
 }
 
+static void draw_hd_animated_spr(uint32 slot)
+{
+    const EFFECT_RECORD *record = &effects.records[slot];
+    uint32 frame = record->params.phase.spr.frame >> 2;
+    uint32 prim = record->params.phase.spr.prim;
+    uint32 palette = record->params.phase.spr.pal;
+    const EFFECT_TEXTURE *tex;
+    RGBC color;
+    HD_TEXTURE texture;
+    if (!hd_capture_active())
+        return;
+    XASSERT(frame < 8 && prim < 20 && palette < 8);
+    tex = &effect_tex[frame];
+    color = effect_packets.quads[disp_state.bank][prim].sdk.rgbc;
+    color.r = color.g = color.b = (uint8)(record->params.brightness.intensity >> 8);
+    texture = (HD_TEXTURE){tex->tpage, effects.pal_clut[palette], tex->u, tex->v, (uint16)(tex->du + 1), (uint16)(tex->dv + 1), HD_TEXTURED | HD_FILTERED};
+    if ((color.code & 1) != 0)
+        texture.flags |= HD_RAW_TEXTURE;
+    if ((color.code & 2) != 0)
+        texture.flags |= HD_SEMITRANSPARENT;
+    hd_particle_billboard(slot, &record->pos, record->params.scale.spr.size / 48.0f, &texture, &color);
+}
+
+static void draw_hd_line(uint32 slot)
+{
+    const EFFECT_RECORD *record = &effects.records[slot];
+    uint32 prim = record->params.phase.particle.prim;
+    const LINE_G2 *packet;
+    VEC3 points[2];
+    RGBC colors[2];
+    if (!hd_capture_active() || !line_hd_valid[slot])
+        return;
+    XASSERT(prim < 20);
+    packet = &effect_packets.lines[disp_state.bank][prim].sdk;
+    points[0] = record->pos;
+    points[1] = line_hd_previous[slot];
+    colors[0] = packet->p[1].rgbc;
+    colors[1] = packet->p[0].rgbc;
+    hd_effect_line(slot, points, colors, disp_state.cur->draw.tpage, (packet->p[0].rgbc.code & 2) != 0);
+}
+
 void effect_draw_all(void)
 {
     uint32 angle = effects.angle[0];
@@ -283,8 +327,13 @@ void effect_draw_all(void)
     update_pool_cooldown();
     update_visibility();
     SetRotMatrix(&model_render.scr.sdk);
+    hd_effects_begin();
     do
     {
+        if ((effects.records[slot].flags & 0x80) != 0 && effects.records[slot].render == draw_animated_spr)
+            draw_hd_animated_spr(slot);
+        if ((effects.records[slot].flags & 0x80) != 0 && effects.records[slot].render == draw_line)
+            draw_hd_line(slot);
         if ((effects.records[slot].flags & 0xC0) == 0xC0)
         {
             callback = effects.records[slot].render;
@@ -335,6 +384,7 @@ uint32 effect_spawn_ballistic_spr(CAR_STATE *car, const VEC3 *point, uint32 styl
     if (packet == 20)
         return 1;
     effects.quad_pool[packet] = (sint8)(1);
+    hd_effect_reset(effect);
     control = effects.records + effect;
     effects.records[effect].params.phase.spr.prim = (uint8)(packet);
     for (bank = 0; bank < 2; ++bank)
@@ -509,6 +559,7 @@ static uint32 update_damped_spr(uint32 idx)
     effects.records[idx].params.phase.spr.lifetime = (uint8)(val);
     if (life == 0)
     {
+        hd_effect_retire(idx, &effects.records[idx].pos, NULL);
         idx = effects.records[idx].params.phase.spr.prim;
         val = -3;
         effects.quad_pool[idx] = (sint8)(val);
@@ -538,6 +589,7 @@ uint32 effect_spawn_rear_spr(CAR_STATE *car, const VEC3 *point, uint32 type)
     if (packet == 20)
         return 1;
     effects.quad_pool[packet] = (sint8)(1);
+    hd_effect_reset(effect);
     control = effects.records + effect;
     effects.records[effect].params.phase.spr.prim = (uint8)(packet);
     for (bank = 0; bank < 2; ++bank)
@@ -605,12 +657,14 @@ uint32 effect_spawn_col_line(const VEC3 *point, CAR_STATE *car)
             break;
     if (effect == 50)
         return 1;
+    line_hd_valid[effect] = 0;
     for (packet = 0; packet < 20; ++packet)
         if (effects.line_pool[packet] == 0)
             break;
     if (packet == 20)
         return 1;
     effects.line_pool[packet] = (sint8)(1);
+    hd_effect_reset(effect);
     control = effects.records + effect;
     effects.records[effect].params.phase.particle.prim = (uint8)(packet);
     random = randPSX();
@@ -660,6 +714,7 @@ static uint32 spawn_wheel_spr(CAR_STATE *car, const VEC3 *pos, uint32 type)
     if (packet == 20)
         return 1;
     effects.quad_pool[packet] = (sint8)(1);
+    hd_effect_reset(effect);
     control = effects.records + effect;
     effects.records[effect].params.phase.spr.prim = (uint8)(packet);
     for (bank = 0; bank < 2; ++bank)
@@ -734,6 +789,7 @@ static uint32 spawn_raindrop(sint32 velocity)
     if (prim == 20)
         return 1;
     effects.quad_pool[prim] = (sint8)(1);
+    hd_effect_reset(slot);
     control = effects.records + slot;
     effects.records[slot].params.phase.spr.prim = (uint8)(prim);
     for (buffer = 0; buffer < 2; ++buffer)
@@ -794,7 +850,8 @@ static intptr draw_scaled_spr(uint32 idx)
     denominator = effects.records[idx].params.scale.spr.size;
     width = (uint32)fixed_divide_checked(0x18000, (sint32)denominator);
     height = (uint32)fixed_divide_checked(0x10000, (sint32)denominator);
-    setXY0(&packet->sdk, effects.records[idx].pos.bits.x, effects.records[idx].pos.bits.y);
+    packet->sdk.p[0].xy.x = (sint16)effects.records[idx].pos.bits.x;
+    packet->sdk.p[0].xy.y = (sint16)effects.records[idx].pos.bits.y;
     packet->sdk.p[1].xy.x = (sint16)(effects.records[idx].pos.bits.x + width);
     packet->sdk.p[1].xy.y = (sint16)(effects.records[idx].pos.bits.y);
     packet->sdk.p[2].xy.x = (sint16)(effects.records[idx].pos.bits.x);
@@ -812,6 +869,12 @@ static intptr draw_scaled_spr(uint32 idx)
     ordering.tags = cur_frame->ordering;
     ordering.byte_offset = 0;
     offset = (1 >> (shift & 31)) * 4;
+    if (hd_capture_active())
+    {
+        HD_TEXTURE texture = hd_quad_texture(packet->sdk.p, &packet->sdk.rgbc);
+        texture.flags &= ~HD_FILTERED;
+        hd_screen_particle(idx, &effects.records[idx].pos, 98304.0f / denominator, 65536.0f / denominator, &texture, &packet->sdk.rgbc, offset / 4);
+    }
     val = ordering.tags[(sint32)(ordering.byte_offset + (uint32)(offset)) / 4];
     packet->sdk.tag = (tag & 0xFF000000) | (val & 0xFFFFFF);
     ordering.tags = cur_frame->ordering;
@@ -837,6 +900,7 @@ static uint32 update_fading_spr(uint32 idx)
     effects.records[idx].params.phase.spr.lifetime = (uint8)(result);
     if (life == 0)
     {
+        hd_effect_retire(idx, &effects.records[idx].pos, NULL);
         prim = effects.records[idx].params.phase.spr.prim;
         result = 0xFFFFFFFD;
         effects.quad_pool[prim] = (sint8)(result);
@@ -853,6 +917,8 @@ static uint32 update_line(uint32 slot)
     uint32 idx;
 
     FUNCTION_MARKER(0x8003C190, "SLUS_006.10");
+    line_hd_previous[slot] = effects.records[slot].pos;
+    line_hd_valid[slot] = 1;
     val = effects.records[slot].pos.bits.x;
     velocity = effects.records[slot].params.scale.line_velocity_x;
     effects.records[slot].pos.bits.x = val + velocity;
@@ -869,6 +935,7 @@ static uint32 update_line(uint32 slot)
     effects.records[slot].params.phase.particle.lifetime = (uint8)(val);
     if (timer == 0)
     {
+        hd_effect_retire(slot, &effects.records[slot].pos, &line_hd_previous[slot]);
         idx = effects.records[slot].params.phase.particle.prim;
         effects.line_pool[idx] = (sint8)(0xFD);
         effects.records[slot].flags = 0;
@@ -912,7 +979,8 @@ static intptr draw_line(uint32 slot)
     xport_gte_execute(0x180001);
     x = (uint16)packet->sdk.p[1].xy.x;
     y = (uint16)packet->sdk.p[1].xy.y;
-    setXY0(&packet->sdk, x, y);
+    packet->sdk.p[0].xy.x = (sint16)x;
+    packet->sdk.p[0].xy.y = (sint16)y;
     val = xport_gte_read_control(31);
     if ((val & 0x1C66000) != 0)
         return (intptr)&packet->sdk.p[1].xy;
@@ -959,7 +1027,11 @@ uint32 effect_init(void)
         XASSERT(operation_ok);
     }
     for (idx = 0; idx < 50; ++idx)
+    {
+        hd_effect_reset(49 - idx);
+        line_hd_valid[49 - idx] = 0;
         effects.records[49 - idx].flags = 0;
+    }
     for (idx = 0; idx < 20; ++idx)
     {
         effects.quad_pool[19 - idx] = 0;
@@ -1006,15 +1078,18 @@ uint32 effect_init(void)
         color = idx == 3 ? 255 : 128;
         setRGB0(quad, color, color, color);
         quad->p[3].uv.v = (uint8)(other + val - 1);
-        quad->p[1].attr = xport_load_le16(tex + 8);
-        quad->p[0].attr = xport_load_le16(tex + 10);
+        quad->p[1].attr = ((const TEXTURE_DESCRIPTOR *)tex)->page;
+        quad->p[0].attr = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     }
     for (idx = 0; idx < 4; ++idx)
     {
         line = &effects.line_templates[idx].sdk;
         setlen(line, 4);
         setcode(line, 0x51);
-        setXY2(line, -1024, -1024, -1024, -1024);
+        line->p[0].xy.x = -1024;
+        line->p[0].xy.y = -1024;
+        line->p[1].xy.x = -1024;
+        line->p[1].xy.y = -1024;
     }
     effects.line_templates[1].sdk.p[1].rgbc.r = (uint8)(230);
     effects.line_templates[1].sdk.p[0].rgbc.r = (uint8)(100);
@@ -1043,10 +1118,10 @@ uint32 effect_init(void)
         frame->v = (uint8)(tex[15]);
         frame->du = (uint8)(tex[12] - 1);
         frame->dv = (uint8)(tex[13] - 1);
-        frame->tpage = (uint16)(xport_load_le16(tex + 8));
-        frame->tpage_blend0 = (uint16)(xport_load_le16(tex + 8) & 0xFF9F);
-        frame->clut = (uint16)(xport_load_le16(tex + 10));
-        val = xport_load_le16(tex + 10);
+        frame->tpage = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        frame->tpage_blend0 = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page & 0xFF9F);
+        frame->clut = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         effects.pal_clut[idx] = (uint16)val;
     }
     return 0;
@@ -1143,6 +1218,7 @@ uint32 effect_update_front_grip_skids(CAR_STATE *car, sint32 amount)
             desc = (handle + val * 4) & 255;
             effect = wheel_skid_controls[desc].seg;
             wheel_skid_controls[desc].active = (uint8)(0);
+            hd_skid_reset(effect);
             wheel_skid_segs[effect].flags = (uint8)(0);
             car->wheel_effect_handles[wheel] = (uint8)(255);
         }
@@ -1204,6 +1280,7 @@ uint32 effect_update_rear_grip_skids(CAR_STATE *car, sint32 amount)
             desc = (handle + val * 4) & 255;
             effect = wheel_skid_controls[desc].seg;
             wheel_skid_controls[desc].active = (uint8)(0);
+            hd_skid_reset(effect);
             wheel_skid_segs[effect].flags = (uint8)(0);
             car->wheel_effect_handles[wheel] = (uint8)(255);
         }
@@ -1346,6 +1423,7 @@ uint32 effect_init_wheel_skids(void)
         wheel_skid_controls[7 - idx].active = (uint8)(0);
     for (idx = 0; idx < 80; ++idx)
     {
+        hd_skid_reset(idx);
         wheel_skid_segs[idx].flags = (uint8)(0);
         packet = wheel_skid_segs[idx].packets;
         packet[0].sdk.tag = (packet[0].sdk.tag & 0x00FFFFFF) | 0x09000000;
@@ -1389,9 +1467,9 @@ uint32 effect_init_wheel_skids(void)
         val = tex[15];
         other = tex[13];
         packet[0].sdk.p[3].uv.v = (uint8)(other + val - 1);
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         packet[0].sdk.p[1].attr = (uint16)(val);
-        val = xport_load_le16(tex + 10);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         packet[0].sdk.p[0].attr = (uint16)(val);
         for (part = 0; part < 32; part += 16)
         {
@@ -1599,6 +1677,7 @@ uint32 effect_draw_wheel_skids(void)
     DISPLAY_FRAME *cur_frame;
 
     FUNCTION_MARKER(0x80044604, "SLUS_006.10");
+    hd_skids_begin();
     for (offset = 0; offset < 10560; offset += 132)
     {
         seg = &wheel_skid_segs[offset / 132];
@@ -1630,6 +1709,21 @@ uint32 effect_draw_wheel_skids(void)
                 else
                     packet->sdk.rgbc.b = (uint8)(color);
             }
+        }
+        if (hd_capture_active())
+        {
+            VECTORF points[4];
+            HD_TEXTURE texture;
+            buffer_idx = disp_state.bank;
+            packet = &seg->packets[buffer_idx];
+            texture = hd_quad_texture(packet->sdk.p, &packet->sdk.rgbc);
+            for (vertex = 0; vertex < 4; ++vertex)
+            {
+                points[vertex].vx = seg->origin.x / 256.0f + seg->vertex[vertex].x;
+                points[vertex].vy = seg->origin.y / 256.0f + seg->vertex[vertex].y;
+                points[vertex].vz = seg->origin.z / 256.0f + seg->vertex[vertex].z;
+            }
+            hd_skid_quad(offset / 132, points, &texture, &packet->sdk.rgbc, (seg->flags & 2) == 0);
         }
         val = seg->origin.bits.x;
         origin = model_render.view.sdk.t[0];
@@ -1709,6 +1803,7 @@ static uint32 find_free_skid_seg(void)
             if ((wheel_skid_segs[idx].flags & 1) == 0)
             {
                 wheel_skid_seg_cursor = (uint32)(idx);
+                hd_skid_reset(idx);
                 return idx;
             }
             ++idx;
@@ -1720,10 +1815,12 @@ static uint32 find_free_skid_seg(void)
         if ((wheel_skid_segs[idx].flags & 1) == 0)
         {
             wheel_skid_seg_cursor = (uint32)(idx);
+            hd_skid_reset(idx);
             return idx;
         }
         ++idx;
     } while (idx < 80);
+    hd_skid_reset(0);
     return 0;
 }
 
@@ -1813,36 +1910,42 @@ static intptr draw_snow(const VECTOR *pos)
         {
             point->bits.x = (uint16)((uint32)coord + 16000);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         coord = point->x;
         if (coord >= 8000)
         {
             point->bits.x = (uint16)((uint32)coord - 16000);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         coord = point->y;
         if (coord < -8000)
         {
             point->bits.y = (uint16)((uint32)coord + 9000);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         coord = point->y;
         if (coord >= 1000)
         {
             point->bits.y = (uint16)((uint32)coord - 9000);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         coord = point->z;
         if (coord < 200)
         {
             point->bits.z = (uint16)((uint32)coord + 16183);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         coord = point->z;
         if (coord >= 16383)
         {
             point->bits.z = (uint16)((uint32)coord - 16183);
             *flag = (0);
+            hd_weather_reset(idx);
         }
         x = (uint32)point->x;
         z = (uint32)point->z;
@@ -1894,6 +1997,24 @@ static intptr draw_snow(const VECTOR *pos)
         poly->p[3].uv.u = (uint8)(u + 32 - val);
         tex = weather_snow_tex;
         poly->p[3].uv.v = (uint8)(tex[15] + 4);
+        if (hd_capture_active())
+        {
+            HD_UI_VERTEX vertices[4];
+            HD_TEXTURE texture = hd_quad_texture(poly->p, &poly->rgbc);
+            float center_x = model_render.width * 0.5f + point->x * 180.0f / point->z;
+            float center_y = model_render.height * 0.5f + point->y * 180.0f / point->z;
+            uint32 corner;
+            texture.width = texture.height = 4;
+            for (corner = 0; corner < 4; ++corner)
+            {
+                vertices[corner].x = center_x + ((corner & 1) != 0 ? 3.0f : -1.0f);
+                vertices[corner].y = center_y + ((corner & 2) != 0 ? 3.0f : -1.0f);
+                vertices[corner].u = (float)poly->p[corner].uv.u;
+                vertices[corner].v = (float)poly->p[corner].uv.v;
+                memcpy(vertices[corner].color, &poly->rgbc, 4);
+            }
+            hd_weather_snow(idx, vertices, &texture);
+        }
         ++poly;
         count = (sint32)weather.active_count;
         ++idx;
@@ -1944,8 +2065,8 @@ static uint32 init_snow(void)
             poly->rgbc.b = (uint8)(64);
             poly->p[3].uv.v = (uint8)(val + 4);
             tex = weather_snow_tex;
-            poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-            poly->p[0].attr = (uint16)(xport_load_le16(tex + 10));
+            poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+            poly->p[0].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
         }
     }
     return 0;
@@ -2002,16 +2123,23 @@ static uint32 init_rain(void)
 
 uint32 effect_init_weather(void)
 {
+    uint16 wire_halfword_1;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
 
     const uint8 *definition;
     sint32 mode;
 
     FUNCTION_MARKER(0x80046460, "SLUS_006.10");
+    {
+        uint32 slot;
+        for (slot = 0; slot < 128; ++slot)
+            hd_weather_reset(slot);
+    }
     level_desc = &scene_level_image.desc;
     XASSERT(!(scene_level_image.bytes == NULL || scene_level_image.size < 2 || level_desc->effects_offset > scene_level_image.size - 2));
     definition = scene_level_image.bytes + (level_desc->effects_offset);
-    mode = (sint16)xport_load_le16(definition);
+    mode = (sint16)(memcpy(&wire_halfword_1, definition, sizeof(wire_halfword_1)), wire_halfword_1);
     weather.active_count = (uint32)(0);
     weather.target_count = (uint32)(0);
     weather.mode = (uint32)((uint32)mode);
@@ -2024,6 +2152,8 @@ uint32 effect_init_weather(void)
 
 intptr effect_update_weather(CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
 
     const uint8 *table;
@@ -2032,6 +2162,8 @@ intptr effect_update_weather(CAR_STATE *car)
     uint32 target;
     uint32 count;
     uint32 random;
+    uint32 retiring_slot = 128;
+    intptr result;
     sint32 node;
     sint32 mode;
 
@@ -2042,9 +2174,9 @@ intptr effect_update_weather(CAR_STATE *car)
     table = scene_level_image.bytes + (level_desc->effects_offset);
     for (idx = 0; idx < 8; ++idx)
     {
-        if (node == (sint16)xport_load_le16(table + 2))
+        if (node == (sint16)(memcpy(&wire_halfword_1, table + 2, sizeof(wire_halfword_1)), wire_halfword_1))
         {
-            val = (sint16)xport_load_le16(table + 4);
+            val = (sint16)(memcpy(&wire_halfword_2, table + 4, sizeof(wire_halfword_2)), wire_halfword_2);
             weather.target_count = (uint32)(val);
         }
         table += 4;
@@ -2057,6 +2189,7 @@ intptr effect_update_weather(CAR_STATE *car)
         if ((sint32)count < (sint32)target)
         {
             weather.visible[count] = (uint8)(0);
+            hd_weather_reset(count);
             val = weather.active_count;
             weather.active_count = (uint32)(val + 1);
         }
@@ -2066,13 +2199,19 @@ intptr effect_update_weather(CAR_STATE *car)
     {
         count = weather.active_count;
         if ((sint32)count > 0)
+        {
+            retiring_slot = count - 1;
             weather.active_count = (uint32)(count - 1);
+        }
     }
     mode = (sint32)weather.mode;
     if (mode == 1)
     {
         idx = car->slot;
-        return draw_snow(&camera_views[idx].eye);
+        result = draw_snow(&camera_views[idx].eye);
+        if (retiring_slot < 128)
+            hd_weather_retire(retiring_slot, weather.mode);
+        return result;
     }
     if (mode >= 2)
         return 0;
@@ -2083,7 +2222,10 @@ intptr effect_update_weather(CAR_STATE *car)
     if ((sint32)count >= (sint32)(random & 127) && (sint32)count > 0)
         spawn_raindrop((sint32)car->steered_speed);
     idx = car->slot;
-    return draw_rain(&camera_views[idx].eye);
+    result = (intptr)draw_rain(&camera_views[idx].eye);
+    if (retiring_slot < 128)
+        hd_weather_retire(retiring_slot, weather.mode);
+    return result;
 }
 
 static uint32 draw_rain(const VECTOR *pos)
@@ -2186,36 +2328,49 @@ static uint32 draw_rain(const VECTOR *pos)
             {
                 point->bits.x = (uint16)((uint32)coord + 8000);
                 *visible = (0);
+                hd_weather_reset(idx);
             }
             coord = point->x;
             if (coord >= 4000)
             {
                 point->bits.x = (uint16)((uint32)coord - 8000);
                 *visible = (0);
+                hd_weather_reset(idx);
             }
             coord = point->y;
             if (coord < -4000)
             {
                 point->bits.y = (uint16)((uint32)coord + 5000);
                 *visible = (0);
+                hd_weather_reset(idx);
             }
             coord = point->y;
             if (coord >= 1000)
             {
                 point->bits.y = (uint16)((uint32)coord - 5000);
                 *visible = (0);
+                hd_weather_reset(idx);
             }
             coord = point->z;
             if (coord < 200)
             {
                 point->bits.z = (uint16)((uint32)coord + 7991);
                 *visible = (0);
+                hd_weather_reset(idx);
             }
             coord = point->z;
             if (coord >= 8191)
             {
                 point->bits.z = (uint16)((uint32)coord - 7991);
                 *visible = (0);
+                hd_weather_reset(idx);
+            }
+            {
+                HD_UI_VERTEX head = {0};
+                head.x = model_render.width * 0.5f + point->x * 180.0f / point->z;
+                head.y = model_render.height * 0.5f + point->y * 180.0f / point->z;
+                memcpy(head.color, &line->p[0].rgbc, 4);
+                hd_weather_rain(idx, &head, &line->p[1].rgbc);
             }
             coord = point->x;
             depth = point->z;

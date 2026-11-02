@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -211,12 +212,13 @@ uint32 presentation_draw_text(uint32 mode, uint32 x, sint32 y, const char *text)
             }
         }
         tex = font->tex;
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         poly->p[1].attr = (uint16)(val);
         tex = font->tex;
         cur_frame = disp_state.cur;
-        val = xport_load_le16(tex + 10);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->p[0].attr = (uint16)(val);
+        hd_ui_gouraud(poly->p, 0);
         head.tags = cur_frame->ordering;
         head.byte_offset = 0;
         tag = poly->tag;
@@ -263,9 +265,9 @@ uint32 presentation_draw_image(uint32 mode, uint32 x, sint32 y, const char *name
             ((uint8 *)&poly->p[vertex].rgbc)[component] = (uint8)(val);
         }
     }
-    val = xport_load_le16(tex + 8);
+    val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     poly->p[1].attr = (uint16)(val);
-    val = xport_load_le16(tex + 10);
+    val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     poly->p[0].attr = (uint16)(val);
     if ((mode & 0x80) == 0)
     {
@@ -322,6 +324,7 @@ uint32 presentation_draw_image(uint32 mode, uint32 x, sint32 y, const char *name
     other = tex[13];
     poly->p[3].uv.v = (uint8)(other + val + 255);
     cur_frame = disp_state.cur;
+    hd_ui_gouraud(poly->p, 0);
     head.tags = cur_frame->ordering;
     head.byte_offset = 0;
     header = poly->tag;
@@ -444,10 +447,10 @@ static void init_font_metrics(void)
         XASSERT(!(pixels == NULL));
         tex = font->tex;
         val = tex[14];
-        page = xport_load_le16(tex + 8);
+        page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         rect.x = (sint16)((val >> 2) + ((page << 6) & 0x3FF));
         tex = font->tex;
-        page = xport_load_le16(tex + 8);
+        page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         val = tex[15];
         rect.y = (sint16)(val + ((page << 4) & 0x100) + ((page >> 2) & 0x200));
         rect.w = (sint16)(width >> 2);
@@ -665,7 +668,17 @@ uint32 presentation_draw_items(void)
             x = object->x_flags;
             y = object->y;
             text = object->content.text;
-            presentation_draw_text(font, x & 0xFFF, y, text);
+            {
+                uint32 first = hd_ui_mark();
+                presentation_draw_text(font, x & 0xFFF, y, text);
+                if (session_flow.menu_state == 81 && (idx == 7 || idx == 8))
+                {
+                    float px = presentation_menu.banner_y_angle * RAD12;
+                    float py = presentation_menu.banner_x_angle * RAD12;
+                    float base_y = idx == 7 ? 100.0f : 108.0f;
+                    hd_ui_motion(first, 400.0f + sinf(px - 48.0f * RAD12) * 32.0f - (x & 0xFFF), base_y + sinf(py - 32.0f * RAD12) * 32.0f - y, 400.0f + sinf(px) * 32.0f - (x & 0xFFF), base_y + sinf(py) * 32.0f - y);
+                }
+            }
             continue;
         }
         val = disp_state.bank;
@@ -687,10 +700,10 @@ uint32 presentation_draw_items(void)
         setcode(poly, 0x3E);
         poly->p[3].rgbc.b = (uint8)(val);
         tex = object->content.tex;
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         poly->p[1].attr = (uint16)(val);
         tex = object->content.tex;
-        val = xport_load_le16(tex + 10);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->p[0].attr = (uint16)(val);
         centered = object->kind & 0x80;
         tex = object->content.tex;
@@ -739,6 +752,7 @@ uint32 presentation_draw_items(void)
             poly->p[vertex].uv.v = (uint8)(val);
         }
         cur_frame = disp_state.cur;
+        hd_ui_gouraud(poly->p, 16);
         head.tags = cur_frame->ordering;
         head.byte_offset = 0;
         tag = poly->tag;
@@ -763,6 +777,7 @@ uint32 presentation_show_image(uint8 *buffer, uint32 capacity, const char *filen
     DISPLAY_FRAME *cur_frame;
 
     FUNCTION_MARKER(0x80019EA0, "SLUS_006.10");
+    hd_suspend();
     XASSERT(!(capacity < 20 + 320 * 256 * 2));
     VSync(0);
     DrawSync(0);
@@ -844,6 +859,7 @@ static void submit_player_name(void)
     }
     else
         session_flow.menu_state = (120);
+    save_autosave();
 }
 
 static void update_player_name(void)
@@ -946,25 +962,6 @@ sint32 presentation_upload_background(void)
     return LoadImagePSX(&rect, (uint32 *)(image + 20));
 }
 
-uint32 presentation_upload_car_background(void)
-{
-    PSX_RECT rect;
-    const uint8 *pixels;
-    uint32 state, bank, bytes;
-
-    FUNCTION_MARKER(0x800B4674, "SLUS_006.10");
-    state = car_selection.phase;
-    pixels = (const uint8 *)presentation_background.image;
-    rect.h = state != 0 ? 152 : 256;
-    bank = disp_state.bank;
-    rect.w = 512;
-    rect.x = 0;
-    rect.y = (sint16)(bank << 8);
-    bytes = (uint32)rect.w * (uint32)rect.h * 2;
-    XASSERT(!(bytes > sizeof(presentation_background.image) - 20));
-    return (uint32)LoadImagePSX(&rect, (uint32 *)(pixels + 20));
-}
-
 void presentation_show_loading(void)
 {
 #if AP_WEB
@@ -984,6 +981,7 @@ void presentation_show_loading(void)
     FUNCTION_MARKER(0x80019BB8, "SLUS_006.10");
     if (session_flow.loading_image_shown == 1)
         return;
+    hd_suspend();
     session_flow.loading_image_shown = (1);
     next = loading_image_cycle + 1;
     loading_image_cycle = (uint32)((sint32)next % 20);
@@ -1021,10 +1019,13 @@ void presentation_show_loading(void)
     VSync(0);
 #endif
     SetDispMask(1);
+    if (!hd_loading_screen())
+    {
 #if AP_WEB
-    // submit one frame so the browser paints before race loading continues
-    gpu_present();
+        // submit one frame so the browser paints before race loading continues
+        gpu_present();
 #endif
+    }
 }
 
 void presentation_show_credits_legal_images(uint8 *buffer, uint32 capacity)
@@ -1124,7 +1125,6 @@ void presentation_load_menu(void)
     else
     {
         presentation_wait_loading();
-        audio_fade();
     }
     random = randPSX();
     audio_play_xa(random % 9);
@@ -1190,6 +1190,7 @@ static void draw_menu_frame(void)
     buffer = disp_state.bank;
     prev = head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4];
     next_packet = &presentation_packets.menu_frame[1][buffer];
+    hd_ui_color_quad(packet->p, &packet->rgbc, 512);
     head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     packet = next_packet;
     init_menu_frame_packet(packet);
@@ -1214,6 +1215,7 @@ static void draw_menu_frame(void)
     buffer = disp_state.bank;
     prev = head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4];
     next_packet = &presentation_packets.menu_frame[2][buffer];
+    hd_ui_color_quad(packet->p, &packet->rgbc, 512);
     head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     packet = next_packet;
     packet->p[1].x = (sint16)(uint16)(442);
@@ -1236,6 +1238,7 @@ static void draw_menu_frame(void)
     head.tags = cur_frame->ordering;
     head.byte_offset = 0;
     prev = head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4];
+    hd_ui_color_quad(packet->p, &packet->rgbc, 512);
     head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     buffer = disp_state.bank;
     packet = &presentation_packets.menu_frame[3][buffer];
@@ -1261,6 +1264,7 @@ static void draw_menu_frame(void)
     head.byte_offset = 0;
     prev = head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4];
     next_packet = &presentation_packets.menu_frame[4][buffer];
+    hd_ui_color_quad(packet->p, &packet->rgbc, 512);
     head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     packet = next_packet;
     init_menu_frame_packet(packet);
@@ -1283,6 +1287,7 @@ static void draw_menu_frame(void)
     head.tags = cur_frame->ordering;
     head.byte_offset = 0;
     prev = head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4];
+    hd_ui_color_quad(packet->p, &packet->rgbc, 512);
     head.tags[(sint32)(head.byte_offset + (uint32)(0x800)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
 }
 
@@ -1364,6 +1369,7 @@ static void edit_audio_options(void)
         head.tags = cur_frame->ordering;
         head.byte_offset = 0;
         prev = head.tags[(sint32)(head.byte_offset + (uint32)(8)) / 4];
+        hd_ui_gradient(packet->p, 2);
         head.tags[(sint32)(head.byte_offset + (uint32)(8)) / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
         amount = 4096 - (row_offset != 0 ? audio_options.effects_volume : audio_options.music_volume);
         packet = &presentation_packets.volume_mask[row_offset / 72][disp_state.bank];
@@ -1402,6 +1408,7 @@ static void edit_audio_options(void)
         head.byte_offset = 0;
         prev = head.tags[(sint32)head.byte_offset / 4];
         y = 130;
+        hd_ui_gradient(packet->p, 0);
         head.tags[(sint32)head.byte_offset / 4] = (prev & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     }
 }
@@ -1516,9 +1523,8 @@ const PRESENTATION_PRES_RECORDS presentation_pres_rec_defaults =
             {
                 {0x0002, presentation_pres_text.options_pad_cfg, 0x0060, 70, 0, 160, 0},
                 {0x0002, presentation_pres_text.options_audio_cfg, 0x0060, 90, 0, 90, 0},
-                {0x0002, presentation_pres_text.options_memory_card_manager, 0x0060, 110, 0, 130, 0},
-                {0x0002, presentation_pres_text.options_scr_cfg, 0x0060, 130, 0, 100, 0},
-                {0x0002, presentation_pres_text.options_game_options, 0x0060, 150, 0, 110, 0},
+                {0x0002, presentation_pres_text.options_scr_cfg, 0x0060, 110, 0, 100, 0},
+                {0x0002, presentation_pres_text.options_game_options, 0x0060, 130, 0, 110, 0},
                 {0x8000, presentation_pres_text.quick_cross, 0x0060, 200, 0, 0, 0},
                 {0x0000, presentation_pres_text.quick_select, 0x0075, 198, 2, 0, 0},
                 {0x8000, presentation_pres_text.quick_triangle, 0x00C8, 200, 0, 0, 0},
@@ -1776,7 +1782,7 @@ const PRESENTATION_RECORD_LIST presentation_rec_lists[PRESENTATION_LIST_COUNT] =
     [PRESENTATION_LIST_MULTIPLAYER] = {presentation_pres_recs.multiplayer, 12},
     [PRESENTATION_LIST_SINGLE_EVENT] = {presentation_pres_recs.single_event, 14},
     [PRESENTATION_LIST_CUP] = {presentation_pres_recs.cup, 14},
-    [PRESENTATION_LIST_OPTIONS] = {presentation_pres_recs.options, 13},
+    [PRESENTATION_LIST_OPTIONS] = {presentation_pres_recs.options, 12},
     [PRESENTATION_LIST_AUDIO] = {presentation_pres_recs.audio, 9},
     [PRESENTATION_LIST_SCREEN] = {presentation_pres_recs.scr, 12},
     [PRESENTATION_LIST_SETTINGS] = {presentation_pres_recs.settings, 17},
@@ -2303,6 +2309,7 @@ static void update_menu(void)
             car_selection_update(0);
             return;
         case 80:
+            save_autosave();
             presentation_load_items(&presentation_rec_lists[PRESENTATION_LIST_MAIN]);
             session_flow.menu_state = (81);
             draw_menu_frame();
@@ -2407,6 +2414,8 @@ static void update_menu(void)
             update_menu_selection(&menu_choices.cup, 6);
             return;
         case 40:
+            if (menu_choices.options_page >= 4)
+                menu_choices.options_page = 3;
             presentation_load_items(&presentation_rec_lists[PRESENTATION_LIST_OPTIONS]);
             session_flow.menu_state = (41);
             draw_menu_frame();
@@ -2414,7 +2423,7 @@ static void update_menu(void)
         case 41:
             draw_menu_frame();
             session_tick_menu_idle();
-            update_menu_selection(&menu_choices.options_page, 5);
+            update_menu_selection(&menu_choices.options_page, 4);
             return;
         case 90:
             presentation_load_items(&presentation_rec_lists[PRESENTATION_LIST_AUDIO]);
@@ -2507,6 +2516,7 @@ static void update_menu(void)
                 presentation_load_items(&presentation_rec_lists[PRESENTATION_LIST_CUP_SUCCESS]);
                 session_award_cup_rewards();
             }
+            save_autosave();
             val = race_session.cup;
             session_flow.menu_state = (171);
             presentation_items[3].content.text = ((uint32)(41 + val) < 48 ? session_event_names[41 + val] : "");
@@ -2612,7 +2622,8 @@ static void update_menu(void)
 
 static void run_menu(void)
 {
-    uint32 val, last_frame;
+    uint32 val, previous_menu;
+    DISPLAY_CLOCK clock;
 
     FUNCTION_MARKER(0x800A79B0, "SLUS_006.10");
     session_reset_menu_history(0);
@@ -2620,17 +2631,24 @@ static void run_menu(void)
     presentation_menu.finished = (0);
     session_flow.load_requested = (uint32)(0);
     session_flow.menu_idle_fields = (0);
-    last_frame = VSync(-1);
+    disp_clock_init(&clock, 1, session_flow.menu_state);
     while (presentation_menu.finished == 0)
     {
+        if (!disp_clock_step(&clock, session_flow.menu_state))
+            continue;
+        hd_begin_frame(1);
         update_menu_flags();
         input_poll();
         disp_swap();
+        hd_menu_view();
         disp_clear_ordering_table();
         model_set_view_pos(&presentation_menu_view_pos);
         model_set_view_angles(&presentation_menu_view_angles);
         presentation_begin_frame();
+        previous_menu = session_flow.menu_state;
         update_menu();
+        if (session_flow.menu_state != previous_menu && (previous_menu == 91 || previous_menu == 101 || previous_menu == 111 || previous_menu == 161))
+            save_autosave();
         presentation_draw_items();
         val = (uint32)audio_poll_xa();
         val = (uint32)timing_read_counter(1, (sint32)val);
@@ -2638,19 +2656,16 @@ static void run_menu(void)
         val = (uint32)DrawSync(0);
         val = (uint32)timing_read_counter(1, (sint32)val);
         disp_state.post_sync_ticks = val;
-        while ((sint32)((uint32)VSync(-1) - last_frame) <= 0)
-        {
-        }
-        last_frame = VSync(-1);
         timing_reset_counter(1);
         presentation_menu.frame_counter = (presentation_menu.frame_counter + 1);
         disp_apply();
-        if (session_flow.menu_state == 21)
-            presentation_upload_car_background();
-        else
-            presentation_upload_background();
+        presentation_upload_background();
+        hd_menu_background(disp_state.bank, 256);
         disp_draw_ordering_table();
+        hd_end_frame();
     }
+    hd_present_frame(clock.field, clock.fields);
+    hd_suspend();
 }
 
 static void load_saved_settings(void)
@@ -2673,16 +2688,23 @@ void presentation_wait_loading(void)
 {
     uint32 elapsed, buttons, prev;
     uint32 fields = disp_state.field_rate * 4;
+    uint32 fade_fields = fields / 2;
+    uint32 volume = audio_options.music_volume;
 
     prev = (xport_input_read(0) | xport_input_read(1)) & (PADRdown | PADstart);
     for (elapsed = 0; elapsed < fields; ++elapsed)
     {
+        if (elapsed >= fields - fade_fields)
+            audio_fade(volume * (fields - elapsed - 1) / fade_fields);
         VSync(0);
         buttons = (xport_input_read(0) | xport_input_read(1)) & (PADRdown | PADstart);
         if ((buttons & ~prev) != 0)
             break;
         prev = buttons;
     }
+    audio_fade(0);
+    audio_stop_xa();
+    audio_stop_voice(20);
 }
 
 uint32 presentation_time_from_ticks(uint32 ticks, uint32 divisor)

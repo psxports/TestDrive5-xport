@@ -139,26 +139,32 @@ static intptr call_lod_renderer(MODEL_RENDERER renderer, const MODEL_RESOURCE *o
 
 intptr model_draw(const MODEL_RESOURCE *object)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 idx, published_type;
     MODEL_RENDERER renderer;
 
     FUNCTION_MARKER(0x8006E180, "SLUS_006.10");
+    hd_draw_model(object);
     XASSERT(!(object->capacity < 2 || (uint32)(0xA) > object->capacity - 2));
-    idx = (sint16)xport_load_le16(object->bytes + (uint32)(0xA));
+    idx = (sint16)(memcpy(&wire_halfword_1, object->bytes + (uint32)(0xA), sizeof(wire_halfword_1)), wire_halfword_1);
     XASSERT(!(object->capacity < 2 || (uint32)(0xA) > object->capacity - 2));
-    published_type = (sint16)xport_load_le16(object->bytes + (uint32)(0xA));
+    published_type = (sint16)(memcpy(&wire_halfword_2, object->bytes + (uint32)(0xA), sizeof(wire_halfword_2)), wire_halfword_2);
     renderer = idx < 14 ? renderers[idx] : NULL;
     return call_renderer(renderer, object, published_type);
 }
 
 intptr model_draw_lod(const MODEL_RESOURCE *object)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 pos, offset, camera, x, y, z, radius, distance;
     const MODEL_RENDERER *table;
     MODEL_RENDERER renderer;
     uint32 x_sq, y_sq, z_sq, radius_sq, idx;
 
     FUNCTION_MARKER(0x80071378, "SLUS_006.10");
+    hd_draw_model(object);
     XASSERT(!(object->capacity < 4 || (uint32)(0x10) > object->capacity - 4));
     pos = ((const MODEL_HEADER *)object->bytes)->position.bits.x;
     XASSERT(!(object->capacity < 4 || (uint32)(0x1C) > object->capacity - 4));
@@ -182,13 +188,13 @@ intptr model_draw_lod(const MODEL_RESOURCE *object)
     z_sq = z * z;
     radius = lighting.radius;
     XASSERT(!(object->capacity < 2 || (uint32)(8) > object->capacity - 2));
-    offset = xport_load_le16(object->bytes + (uint32)(8));
+    offset = (memcpy(&wire_halfword_1, object->bytes + (uint32)(8), sizeof(wire_halfword_1)), wire_halfword_1);
     radius = (uint32)((sint32)(offset << 16) >> 20) + (uint32)((sint32)radius >> 4);
     radius_sq = radius * radius;
     distance = x_sq + y_sq + z_sq;
     table = (sint32)distance < (sint32)radius_sq ? near_renderers : renderers;
     XASSERT(!(object->capacity < 2 || (uint32)(0xA) > object->capacity - 2));
-    idx = (sint16)xport_load_le16(object->bytes + (uint32)(0xA));
+    idx = (sint16)(memcpy(&wire_halfword_2, object->bytes + (uint32)(0xA), sizeof(wire_halfword_2)), wire_halfword_2);
     renderer = idx < 14 ? table[idx] : NULL;
     return call_lod_renderer(renderer, object, x_sq, y_sq, radius_sq);
 }
@@ -206,6 +212,7 @@ const sint16 *model_transform_matrix(const MATRIX *matrix, const VEC3 *pos)
     uint32 word2;
 
     FUNCTION_MARKER(0x800797FC, "SLUS_006.10");
+    hd_transform_model(matrix, pos, 0);
     val = pos->bits.x;
     origin = model_render.view.sdk.t[0];
     input.vx = (sint32)((uint32)((sint32)val >> 8) - origin);
@@ -267,6 +274,7 @@ sint32 *model_transform_active_pos(const VEC3 *pos)
     uint32 z;
 
     FUNCTION_MARKER(0x80079B84, "SLUS_006.10");
+    hd_transform_model(NULL, pos, 0);
     val = pos->bits.x;
     origin = model_render.view.sdk.t[0];
     input.vx = (sint32)((uint32)((sint32)val >> 8) - origin);
@@ -299,6 +307,7 @@ sint32 *model_transform_pos(const VEC3 *pos)
     uint32 z;
 
     FUNCTION_MARKER(0x80079C14, "SLUS_006.10");
+    hd_transform_model(NULL, pos, 1);
     input.vx = pos->x >> 8;
     input.vy = pos->y >> 8;
     input.vz = pos->z >> 8;
@@ -319,6 +328,8 @@ sint32 *model_transform_pos(const VEC3 *pos)
 
 uint32 model_visible_matrix(const uint8 *model_header)
 {
+    uint16 wire_halfword_1;
+
     VECTOR input;
     VECTOR output;
     MATRIX *matrix;
@@ -339,7 +350,7 @@ uint32 model_visible_matrix(const uint8 *model_header)
     val = ((const MODEL_HEADER *)model_header)->position.bits.x;
     offset = ((const MODEL_HEADER *)model_header)->origin.bits.x;
     origin = model_render.view.sdk.t[0];
-    radius = (sint16)xport_load_le16(model_header + 8);
+    radius = (sint16)(memcpy(&wire_halfword_1, model_header + 8, sizeof(wire_halfword_1)), wire_halfword_1);
     input.vx = (sint32)((uint32)((sint32)val >> 8) + offset - origin);
     val = ((const MODEL_HEADER *)model_header)->position.bits.y;
     offset = ((const MODEL_HEADER *)model_header)->origin.bits.y;
@@ -386,6 +397,8 @@ uint32 model_visible_matrix(const uint8 *model_header)
 
 uint32 model_visible(const uint8 *model_header)
 {
+    uint16 wire_halfword_1;
+
     VECTOR input;
     VECTOR output;
     uint32 val;
@@ -405,7 +418,7 @@ uint32 model_visible(const uint8 *model_header)
     val = ((const MODEL_HEADER *)model_header)->position.bits.x;
     offset = ((const MODEL_HEADER *)model_header)->origin.bits.x;
     origin = model_render.view.sdk.t[0];
-    radius = (sint16)xport_load_le16(model_header + 8);
+    radius = (sint16)(memcpy(&wire_halfword_1, model_header + 8, sizeof(wire_halfword_1)), wire_halfword_1);
     input.vx = (sint32)((uint32)((sint32)val >> 8) + offset - origin);
     val = ((const MODEL_HEADER *)model_header)->position.bits.y;
     offset = ((const MODEL_HEADER *)model_header)->origin.bits.y;
@@ -450,6 +463,8 @@ uint32 model_visible(const uint8 *model_header)
 
 uint32 model_visible_origin(const uint8 *model_header)
 {
+    uint16 wire_halfword_1;
+
     VECTOR input;
     VECTOR output;
     MATRIX *matrix;
@@ -468,7 +483,7 @@ uint32 model_visible_origin(const uint8 *model_header)
     FUNCTION_MARKER(0x80079FD0, "SLUS_006.10");
     val = ((const MODEL_HEADER *)model_header)->position.bits.x;
     origin = ((const MODEL_HEADER *)model_header)->origin.bits.x;
-    radius = (sint16)xport_load_le16(model_header + 8);
+    radius = (sint16)(memcpy(&wire_halfword_1, model_header + 8, sizeof(wire_halfword_1)), wire_halfword_1);
     input.vx = (sint32)((uint32)((sint32)val >> 8) + origin);
     val = ((const MODEL_HEADER *)model_header)->position.bits.y;
     origin = ((const MODEL_HEADER *)model_header)->origin.bits.y;
@@ -514,6 +529,10 @@ uint32 model_visible_origin(const uint8 *model_header)
 
 static intptr draw_format0(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+
     const MODEL_VERTEX *vertex_input;
     DISPLAY_ORDERING ordering, ordering_slot;
     uint32 stream_offset, buffer, shift, lod, prim_offset, packet_offset, vertex_offset, offset;
@@ -544,7 +563,7 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
     vertex_offset = ((const MODEL_HEADER *)model_input->bytes)->vertex_offset;
     packet_offset = offset;
     XASSERT(!(model_input->capacity < 2 || (uint32)(0xC) > model_input->capacity - 2));
-    offset = (sint16)xport_load_le16(model_input->bytes + (uint32)(0xC));
+    offset = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(0xC), sizeof(wire_halfword_1)), wire_halfword_1);
     cur_frame = disp_state.cur;
     shift_difference = (sint64)(sint32)shift - (sint64)(sint32)lod;
     if (shift_difference < (-2147483647 - (sint64)1) || shift_difference > 2147483647)
@@ -559,7 +578,7 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
     for (;;)
     {
         XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-        count = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+        count = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_2)), wire_halfword_2);
         XASSERT(!(model_input->capacity < 1 || (uint32)(prim_offset + 2) > model_input->capacity - 1));
         kind = (model_input->bytes + (uint32)(prim_offset + 2))[0];
         if (count == 0)
@@ -577,11 +596,11 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
         if (!triangle)
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-            idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+            idx0 = (sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_3)), wire_halfword_3);
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-            idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+            idx1 = (sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_4)), wire_halfword_4);
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-            idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+            idx2 = (sint16)(memcpy(&wire_halfword_5, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_5)), wire_halfword_5);
             offset0 = vertex_offset + idx0 * 8;
             offset1 = vertex_offset + idx1 * 8;
             offset2 = vertex_offset + idx2 * 8;
@@ -591,11 +610,11 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
             if (triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-                idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+                idx0 = (sint16)(memcpy(&wire_halfword_6, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_6)), wire_halfword_6);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-                idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+                idx1 = (sint16)(memcpy(&wire_halfword_7, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_7)), wire_halfword_7);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-                idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+                idx2 = (sint16)(memcpy(&wire_halfword_8, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_8)), wire_halfword_8);
                 offset0 = vertex_offset + idx0 * 8;
                 offset1 = vertex_offset + idx1 * 8;
                 offset2 = vertex_offset + idx2 * 8;
@@ -615,18 +634,18 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
             if (!triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 6) > model_input->capacity - 2));
-                idx3 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 6));
+                idx3 = (sint16)(memcpy(&wire_halfword_9, model_input->bytes + (uint32)(prim_offset + 6), sizeof(wire_halfword_9)), wire_halfword_9);
                 prim_offset += stream_step;
             }
             xport_gte_execute(0x280030);
             if (!triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-                idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+                idx0 = (sint16)(memcpy(&wire_halfword_10, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_10)), wire_halfword_10);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-                idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+                idx1 = (sint16)(memcpy(&wire_halfword_11, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_11)), wire_halfword_11);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-                idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+                idx2 = (sint16)(memcpy(&wire_halfword_12, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_12)), wire_halfword_12);
                 next_offset0 = vertex_offset + idx0 * 8;
             }
             xport_gte_execute(0x1400006);
@@ -794,6 +813,10 @@ static intptr draw_format0(const MODEL_RESOURCE *model_input)
 
 static intptr draw_format1(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+
     uint32 wire_word_3, wire_word_4, wire_word_5, wire_word_6, wire_word_7, wire_word_8, wire_word_9, wire_word_10, wire_word_11, wire_word_12, wire_word_13, wire_word_14, wire_word_15, wire_word_16, wire_word_17, wire_word_18, wire_word_19, wire_word_20, wire_word_21, wire_word_22, wire_word_23;
     const MODEL_VERTEX *vertex_input;
     DISPLAY_ORDERING ordering, ordering_slot;
@@ -825,7 +848,7 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
     vertex_offset = ((const MODEL_HEADER *)model_input->bytes)->vertex_offset;
     packet_offset = offset;
     XASSERT(!(model_input->capacity < 2 || (uint32)(0xC) > model_input->capacity - 2));
-    offset = (sint16)xport_load_le16(model_input->bytes + (uint32)(0xC));
+    offset = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(0xC), sizeof(wire_halfword_1)), wire_halfword_1);
     cur_frame = disp_state.cur;
     shift_difference = (sint64)(sint32)shift - (sint64)(sint32)lod;
     if (shift_difference < (-2147483647 - (sint64)1) || shift_difference > 2147483647)
@@ -840,7 +863,7 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
     for (;;)
     {
         XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-        count = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+        count = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_2)), wire_halfword_2);
         XASSERT(!(model_input->capacity < 1 || (uint32)(prim_offset + 2) > model_input->capacity - 1));
         kind = (model_input->bytes + (uint32)(prim_offset + 2))[0];
         if (count == 0)
@@ -858,11 +881,11 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
         if (!triangle)
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-            idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+            idx0 = (sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_3)), wire_halfword_3);
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-            idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+            idx1 = (sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_4)), wire_halfword_4);
             XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-            idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+            idx2 = (sint16)(memcpy(&wire_halfword_5, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_5)), wire_halfword_5);
             offset0 = vertex_offset + idx0 * 8;
             offset1 = vertex_offset + idx1 * 8;
             offset2 = vertex_offset + idx2 * 8;
@@ -872,11 +895,11 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
             if (triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-                idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+                idx0 = (sint16)(memcpy(&wire_halfword_6, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_6)), wire_halfword_6);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-                idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+                idx1 = (sint16)(memcpy(&wire_halfword_7, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_7)), wire_halfword_7);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-                idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+                idx2 = (sint16)(memcpy(&wire_halfword_8, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_8)), wire_halfword_8);
                 offset0 = vertex_offset + idx0 * 8;
                 offset1 = vertex_offset + idx1 * 8;
                 offset2 = vertex_offset + idx2 * 8;
@@ -896,18 +919,18 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
             if (!triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 6) > model_input->capacity - 2));
-                idx3 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 6));
+                idx3 = (sint16)(memcpy(&wire_halfword_9, model_input->bytes + (uint32)(prim_offset + 6), sizeof(wire_halfword_9)), wire_halfword_9);
                 prim_offset += stream_step;
             }
             xport_gte_execute(0x280030);
             if (!triangle)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset) > model_input->capacity - 2));
-                idx0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset));
+                idx0 = (sint16)(memcpy(&wire_halfword_10, model_input->bytes + (uint32)(prim_offset), sizeof(wire_halfword_10)), wire_halfword_10);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 2) > model_input->capacity - 2));
-                idx1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 2));
+                idx1 = (sint16)(memcpy(&wire_halfword_11, model_input->bytes + (uint32)(prim_offset + 2), sizeof(wire_halfword_11)), wire_halfword_11);
                 XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4) > model_input->capacity - 2));
-                idx2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4));
+                idx2 = (sint16)(memcpy(&wire_halfword_12, model_input->bytes + (uint32)(prim_offset + 4), sizeof(wire_halfword_12)), wire_halfword_12);
                 next_offset0 = vertex_offset + idx0 * 8;
             }
             xport_gte_execute(0x1400006);
@@ -1156,6 +1179,8 @@ static intptr draw_format1(const MODEL_RESOURCE *model_input)
 
 static intptr draw_format4(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     DISPLAY_ORDERING ordering;
     MODEL_VERTEX copied[4][4];
     uint32 radius;
@@ -1188,7 +1213,7 @@ static intptr draw_format4(const MODEL_RESOURCE *model_input)
 
     FUNCTION_MARKER(0x80076F44, "SLUS_006.10");
     XASSERT(!(model_input->capacity < 2 || (uint32)(8) > model_input->capacity - 2));
-    radius = (sint16)xport_load_le16(model_input->bytes + (uint32)(8));
+    radius = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(8), sizeof(wire_halfword_1)), wire_halfword_1);
     val = model_render.depth;
     far_plane = (sint32)model_render.lod_half_distance;
     if ((sint32)(val - radius) >= far_plane)
@@ -1204,7 +1229,7 @@ static intptr draw_format4(const MODEL_RESOURCE *model_input)
     val = model_render.ot_shift;
     cur_frame = disp_state.cur;
     XASSERT(!(model_input->capacity < 2 || (uint32)(12) > model_input->capacity - 2));
-    bias = (sint16)xport_load_le16(model_input->bytes + (uint32)(12));
+    bias = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(12), sizeof(wire_halfword_2)), wire_halfword_2);
     shift = (val - shift) & 31;
     ordering.tags = cur_frame->ordering;
     ordering.byte_offset = 0;
@@ -1219,7 +1244,7 @@ static intptr draw_format4(const MODEL_RESOURCE *model_input)
         XASSERT(!(model_input->capacity < 1 || (uint32)(stream_offset + 2) > model_input->capacity - 1));
         kind = (model_input->bytes + (uint32)(stream_offset + 2))[0];
         XASSERT(!(model_input->capacity < 2 || (uint32)(stream_offset) > model_input->capacity - 2));
-        count = (sint16)xport_load_le16(model_input->bytes + (uint32)(stream_offset));
+        count = (sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(stream_offset), sizeof(wire_halfword_3)), wire_halfword_3);
         stream_offset += 4;
         if (kind <= 3 && count > 0)
         {
@@ -1233,7 +1258,7 @@ static intptr draw_format4(const MODEL_RESOURCE *model_input)
                 for (vertex_idx = 0; vertex_idx < vertex_count; ++vertex_idx)
                 {
                     XASSERT(!(model_input->capacity < 2 || (uint32)(stream_offset + vertex_idx * 2) > model_input->capacity - 2));
-                    val = (sint16)xport_load_le16(model_input->bytes + (uint32)(stream_offset + vertex_idx * 2));
+                    val = (sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(stream_offset + vertex_idx * 2), sizeof(wire_halfword_4)), wire_halfword_4);
                     vertex_src_offset = vertex_offset + (val << 3);
                     // Complete LWL/LWR pairs retain unaligned vertex words
                     for (word_idx = 0; word_idx < 2; ++word_idx)
@@ -1388,6 +1413,8 @@ static intptr draw_format10(const MODEL_RESOURCE *model_input)
 
 static intptr draw_format12(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 wire_word_28, wire_word_29, wire_word_30, wire_word_31;
     POLY_FT4 *poly;
     POLY_FT4 *billboard_poly;
@@ -1434,7 +1461,7 @@ static intptr draw_format12(const MODEL_RESOURCE *model_input)
     for (vertex = 0; vertex < 3; ++vertex)
     {
         XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4 + vertex * 2) > model_input->capacity - 2));
-        vertex_offsets[vertex] = vertex_offset + (uint32)(sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 4 + vertex * 2)) * 8;
+        vertex_offsets[vertex] = vertex_offset + (uint32)(sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(prim_offset + 4 + vertex * 2), sizeof(wire_halfword_1)), wire_halfword_1) * 8;
     }
     for (vertex = 0; vertex < 3; ++vertex)
     {
@@ -1448,7 +1475,7 @@ static intptr draw_format12(const MODEL_RESOURCE *model_input)
     billboard_poly->p[1].xy.xy = xport_gte_read_data(13);
     billboard_poly->p[2].xy.xy = xport_gte_read_data(14);
     XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 10) > model_input->capacity - 2));
-    offset3 = vertex_offset + (uint32)(sint16)xport_load_le16(model_input->bytes + (uint32)(prim_offset + 10)) * 8;
+    offset3 = vertex_offset + (uint32)(sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(prim_offset + 10), sizeof(wire_halfword_2)), wire_halfword_2) * 8;
     XASSERT(!(model_input->capacity < 4 || (uint32)(offset3) > model_input->capacity - 4));
     xport_gte_write_data(0, (memcpy(&wire_word_30, model_input->bytes + (uint32)(offset3), sizeof(wire_word_30)), wire_word_30));
     XASSERT(!(model_input->capacity < 4 || (uint32)(offset3 + 4) > model_input->capacity - 4));
@@ -1530,8 +1557,8 @@ static intptr draw_format12(const MODEL_RESOURCE *model_input)
         height = model_render.height;
         half_height = ((sint32)height / 2);
         poly->tag = (uint32)(0x09000000);
-        poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-        val = xport_load_le16(tex + 10);
+        poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->rgbc.rgbc = (uint32)(color);
         poly->p[0].attr = (uint16)(val);
         poly->p[0].uv.u = (uint8)(tex[14]);
@@ -1590,6 +1617,10 @@ restore_rotation:
 
 static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10;
+
     const MODEL_VERTEX *vertex_input;
     uint32 *output_tag;
     POINT_CT *output_points;
@@ -1639,23 +1670,23 @@ static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
     shift -= model_render.coord_shift;
     cur_frame = disp_state.cur;
     XASSERT(!(model_input->capacity < 2 || (uint32)(12) > model_input->capacity - 2));
-    model_depth = (sint16)xport_load_le16(model_input->bytes + (uint32)(12));
+    model_depth = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(12), sizeof(wire_halfword_1)), wire_halfword_1);
     ordering_base.tags = cur_frame->ordering;
     ordering_base.byte_offset = (uint32)(((uint32)(model_depth >> (shift & 31)) << 2));
     count = used_vertex_count(model_input);
     XASSERT(!(model_input->capacity < 2 || 14 > model_input->capacity - 2));
-    xport_store_le16(model_input->bytes + 14, (uint16)count);
+    (((MODEL_HEADER *)model_input->bytes)->visible_vertices = (uint16)count);
     if ((sint32)(count << 16) > 0)
     {
         idx = 0;
         do
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(vertex_offset + idx * 8) > model_input->capacity - 2));
-            sq.vx = (sint32)(delta.bits.x + (uint32)(sint16)xport_load_le16(model_input->bytes + (uint32)(vertex_offset + idx * 8)));
+            sq.vx = (sint32)(delta.bits.x + (uint32)(sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(vertex_offset + idx * 8), sizeof(wire_halfword_2)), wire_halfword_2));
             XASSERT(!(model_input->capacity < 2 || (uint32)(vertex_offset + idx * 8 + 2) > model_input->capacity - 2));
-            sq.vy = (sint32)(delta.bits.y + (uint32)(sint16)xport_load_le16(model_input->bytes + (uint32)(vertex_offset + idx * 8 + 2)));
+            sq.vy = (sint32)(delta.bits.y + (uint32)(sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(vertex_offset + idx * 8 + 2), sizeof(wire_halfword_3)), wire_halfword_3));
             XASSERT(!(model_input->capacity < 2 || (uint32)(vertex_offset + idx * 8 + 4) > model_input->capacity - 2));
-            sq.vz = (sint32)(delta.bits.z + (uint32)(sint16)xport_load_le16(model_input->bytes + (uint32)(vertex_offset + idx * 8 + 4)));
+            sq.vz = (sint32)(delta.bits.z + (uint32)(sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(vertex_offset + idx * 8 + 4), sizeof(wire_halfword_4)), wire_halfword_4));
             Square0(&sq, &sq);
             threshold = lighting.radius_sq;
             sum = (uint32)sq.vx + (uint32)sq.vy + (uint32)sq.vz;
@@ -1668,7 +1699,7 @@ static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
             ++color_output;
             ++idx;
             XASSERT(!(model_input->capacity < 2 || (uint32)(14) > model_input->capacity - 2));
-        } while ((sint32)idx < (sint16)xport_load_le16(model_input->bytes + (uint32)(14)));
+        } while ((sint32)idx < (sint16)(memcpy(&wire_halfword_5, model_input->bytes + (uint32)(14), sizeof(wire_halfword_5)), wire_halfword_5));
     }
     for (;;)
     {
@@ -1678,7 +1709,7 @@ static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
         XASSERT(!(model_input->capacity < 1 || (uint32)(rec_offset + 2) > model_input->capacity - 1));
         type = (model_input->bytes + (uint32)(rec_offset + 2))[0];
         XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-        polygon_count = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+        polygon_count = (sint16)(memcpy(&wire_halfword_6, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_6)), wire_halfword_6);
         rec_offset += 4;
         if (type > 1)
             continue;
@@ -1695,15 +1726,15 @@ static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
         for (polygon = 0; polygon < polygon_count; ++polygon)
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-            indices[0] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+            indices[0] = (sint16)(memcpy(&wire_halfword_7, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_7)), wire_halfword_7);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 2) > model_input->capacity - 2));
-            indices[1] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 2));
+            indices[1] = (sint16)(memcpy(&wire_halfword_8, model_input->bytes + (uint32)(rec_offset + 2), sizeof(wire_halfword_8)), wire_halfword_8);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 4) > model_input->capacity - 2));
-            indices[2] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 4));
+            indices[2] = (sint16)(memcpy(&wire_halfword_9, model_input->bytes + (uint32)(rec_offset + 4), sizeof(wire_halfword_9)), wire_halfword_9);
             if (type == 1)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 6) > model_input->capacity - 2));
-                indices[3] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 6));
+                indices[3] = (sint16)(memcpy(&wire_halfword_10, model_input->bytes + (uint32)(rec_offset + 6), sizeof(wire_halfword_10)), wire_halfword_10);
             }
             offset0 = vertex_offset + (indices[0] << 3);
             offset1 = vertex_offset + (indices[1] << 3);
@@ -1802,6 +1833,9 @@ static intptr draw_format0_near(const MODEL_RESOURCE *model_input)
 
 static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+
     const MODEL_VERTEX *vertex_input;
     uint32 *output_tag;
     POINT_CT *output_points;
@@ -1855,12 +1889,12 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
     shift = model_render.ot_shift;
     shift -= model_render.coord_shift;
     XASSERT(!(model_input->capacity < 2 || (uint32)(12) > model_input->capacity - 2));
-    model_depth = (sint16)xport_load_le16(model_input->bytes + (uint32)(12));
+    model_depth = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(12), sizeof(wire_halfword_1)), wire_halfword_1);
     ordering_base.tags = cur_frame->ordering;
     ordering_base.byte_offset = (uint32)(((uint32)(model_depth >> (shift & 31)) << 2));
     count = used_vertex_count(model_input);
     XASSERT(!(model_input->capacity < 2 || 14 > model_input->capacity - 2));
-    xport_store_le16(model_input->bytes + 14, (uint16)count);
+    (((MODEL_HEADER *)model_input->bytes)->visible_vertices = (uint16)count);
     if ((sint32)(count << 16) > 0)
     {
         idx = 0;
@@ -1869,7 +1903,7 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
             for (component = 0; component < 3; ++component)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(vertex_offset + idx * 8 + component * 2) > model_input->capacity - 2));
-                coord = (sint16)xport_load_le16(model_input->bytes + (uint32)(vertex_offset + idx * 8 + component * 2));
+                coord = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(vertex_offset + idx * 8 + component * 2), sizeof(wire_halfword_2)), wire_halfword_2);
                 reference = delta.u[component];
                 light_pos.u[component] = reference + coord;
             }
@@ -1891,7 +1925,7 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
             ++color_output;
             ++idx;
             XASSERT(!(model_input->capacity < 2 || (uint32)(14) > model_input->capacity - 2));
-        } while ((sint32)idx < (sint16)xport_load_le16(model_input->bytes + (uint32)(14)));
+        } while ((sint32)idx < (sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(14), sizeof(wire_halfword_3)), wire_halfword_3));
     }
     for (;;)
     {
@@ -1901,7 +1935,7 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
         XASSERT(!(model_input->capacity < 1 || (uint32)(rec_offset + 2) > model_input->capacity - 1));
         type = (model_input->bytes + (uint32)(rec_offset + 2))[0];
         XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-        polygon_count = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+        polygon_count = (sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_4)), wire_halfword_4);
         rec_offset += 4;
         if (type > 1)
             continue;
@@ -1922,15 +1956,15 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
         for (polygon = 0; polygon < polygon_count; ++polygon)
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-            indices[0] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+            indices[0] = (sint16)(memcpy(&wire_halfword_5, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_5)), wire_halfword_5);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 2) > model_input->capacity - 2));
-            indices[1] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 2));
+            indices[1] = (sint16)(memcpy(&wire_halfword_6, model_input->bytes + (uint32)(rec_offset + 2), sizeof(wire_halfword_6)), wire_halfword_6);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 4) > model_input->capacity - 2));
-            indices[2] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 4));
+            indices[2] = (sint16)(memcpy(&wire_halfword_7, model_input->bytes + (uint32)(rec_offset + 4), sizeof(wire_halfword_7)), wire_halfword_7);
             if (type == 1)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 6) > model_input->capacity - 2));
-                indices[3] = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 6));
+                indices[3] = (sint16)(memcpy(&wire_halfword_8, model_input->bytes + (uint32)(rec_offset + 6), sizeof(wire_halfword_8)), wire_halfword_8);
             }
             snapshot = snapshots[type];
             for (component = 0; component < (type == 0 ? 3u : 4u); ++component)
@@ -2038,6 +2072,9 @@ static intptr draw_format4_near(const MODEL_RESOURCE *model_input)
 
 static intptr draw_format10_near(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     const MODEL_VERTEX *vertex_input;
     DISPLAY_ORDERING head_address, ordering_table;
     POLY_FT3 *poly3;
@@ -2093,7 +2130,7 @@ static intptr draw_format10_near(const MODEL_RESOURCE *model_input)
     XASSERT(!(model_input->capacity < 4 || (uint32)(48) > model_input->capacity - 4));
     records_offset = ((const MODEL_HEADER *)model_input->bytes)->stream_offset;
     XASSERT(!(model_input->capacity < 2 || (uint32)(12) > model_input->capacity - 2));
-    model_depth = (sint16)xport_load_le16(model_input->bytes + (uint32)(12));
+    model_depth = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + (uint32)(12), sizeof(wire_halfword_1)), wire_halfword_1);
     ordering_table.tags = cur_frame->ordering;
     ordering_table.byte_offset = 0;
     center_x = near_billboard_center.x;
@@ -2119,7 +2156,7 @@ static intptr draw_format10_near(const MODEL_RESOURCE *model_input)
         XASSERT(!(model_input->capacity < 1 || (uint32)(rec_offset + 2) > model_input->capacity - 1));
         type = (model_input->bytes + (uint32)(rec_offset + 2))[0];
         XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-        count = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+        count = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_2)), wire_halfword_2);
         rec_offset += 4;
         if (type > 1)
             continue;
@@ -2127,15 +2164,15 @@ static intptr draw_format10_near(const MODEL_RESOURCE *model_input)
         for (polygon = 0; polygon < count; ++polygon)
         {
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset) > model_input->capacity - 2));
-            val0 = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset));
+            val0 = (sint16)(memcpy(&wire_halfword_3, model_input->bytes + (uint32)(rec_offset), sizeof(wire_halfword_3)), wire_halfword_3);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 2) > model_input->capacity - 2));
-            val1 = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 2));
+            val1 = (sint16)(memcpy(&wire_halfword_4, model_input->bytes + (uint32)(rec_offset + 2), sizeof(wire_halfword_4)), wire_halfword_4);
             XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 4) > model_input->capacity - 2));
-            val2 = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 4));
+            val2 = (sint16)(memcpy(&wire_halfword_5, model_input->bytes + (uint32)(rec_offset + 4), sizeof(wire_halfword_5)), wire_halfword_5);
             if (type == 1)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + 6) > model_input->capacity - 2));
-                val3 = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + 6));
+                val3 = (sint16)(memcpy(&wire_halfword_6, model_input->bytes + (uint32)(rec_offset + 6), sizeof(wire_halfword_6)), wire_halfword_6);
             }
             val0 = vertex_offset + (val0 << 3);
             val1 = vertex_offset + (val1 << 3);
@@ -4025,6 +4062,7 @@ sint32 model_set_view_pos(const VECTOR *pos)
     sint32 result;
 
     FUNCTION_MARKER(0x80078C18, "SLUS_006.10");
+    hd_camera_position(pos);
     model_render.view_base.sdk.t[0] = pos->vx >> 8;
     model_render.view_base.sdk.t[1] = pos->vy >> 8;
     model_render.view_base.sdk.t[2] = pos->vz >> 8;
@@ -4102,6 +4140,7 @@ uint32 model_aim_view(const VECTOR *pos, sint32 roll)
     MATRIX *matrix;
 
     FUNCTION_MARKER(0x80079094, "SLUS_006.10");
+    hd_camera_aim(pos, roll);
     val = (uint32)pos->vx;
     origin = model_render.view_base.sdk.t[0];
     x = (uint32)((sint32)val >> 8) - origin;
@@ -4224,6 +4263,7 @@ sint32 model_set_view_angles(const SVECTOR *angles)
     sint32 m11;
 
     FUNCTION_MARKER(0x80078DDC, "SLUS_006.10");
+    hd_camera_angles(angles);
     cos_x = (uint32)rcos(angles->vx);
     sin_x = (uint32)rsin(angles->vx);
     cos_y = (uint32)rcos(angles->vy);
@@ -4357,6 +4397,7 @@ void model_set_depth_range(uint32 near_depth, uint32 far_depth)
 void model_set_back_color(sint32 r, sint32 g, sint32 b)
 {
     FUNCTION_MARKER(0x80078C98, "SLUS_006.10");
+    hd_set_back_color(r, g, b);
     SetBackColor((sint32)((uint32)r << 1), (sint32)((uint32)g << 1), (sint32)((uint32)b << 1));
 }
 
@@ -4387,6 +4428,7 @@ void model_apply_light_matrix(const MATRIX *matrix)
     MATRIX result;
 
     FUNCTION_MARKER(0x80078D48, "SLUS_006.10");
+    hd_set_lighting(matrix);
     MulMatrix0(&model_render.light, (MATRIX *)matrix, &result);
     SetLightMatrix(&result);
     SetColorMatrix(&model_render.color);
@@ -4510,6 +4552,7 @@ uint32 model_init_lighting(uint32 radius, uint8 *dst, const uint8 *color, uint32
     uint32 components[3];
 
     FUNCTION_MARKER(0x8006E2F4, "SLUS_006.10");
+    hd_distance_lighting(radius, color, height);
     dst[0] = 0;
     dst[1] = 0;
     dst[2] = 0;
@@ -4582,6 +4625,8 @@ uint32 model_init_lighting(uint32 radius, uint8 *dst, const uint8 *color, uint32
 
 static uint32 used_vertex_count(const MODEL_RESOURCE *model_input)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 rec_offset, type, stride, vertices, vertex;
     sint32 count, idx, val, maximum = 0;
 
@@ -4596,7 +4641,7 @@ static uint32 used_vertex_count(const MODEL_RESOURCE *model_input)
         XASSERT(!(model_input->capacity < 1 || (uint32)(rec_offset + 2) > model_input->capacity - 1));
         type = model_input->bytes[(uint32)(rec_offset + 2)];
         XASSERT(!(model_input->capacity < 2 || rec_offset > model_input->capacity - 2));
-        count = (sint16)xport_load_le16(model_input->bytes + rec_offset);
+        count = (sint16)(memcpy(&wire_halfword_1, model_input->bytes + rec_offset, sizeof(wire_halfword_1)), wire_halfword_1);
         rec_offset += 4;
         if (type > 3)
             continue;
@@ -4607,7 +4652,7 @@ static uint32 used_vertex_count(const MODEL_RESOURCE *model_input)
             for (vertex = 0; vertex < vertices; ++vertex)
             {
                 XASSERT(!(model_input->capacity < 2 || (uint32)(rec_offset + vertex * 2) > model_input->capacity - 2));
-                val = (sint16)xport_load_le16(model_input->bytes + (uint32)(rec_offset + vertex * 2));
+                val = (sint16)(memcpy(&wire_halfword_2, model_input->bytes + (uint32)(rec_offset + vertex * 2), sizeof(wire_halfword_2)), wire_halfword_2);
                 if (maximum < val)
                     maximum = val;
             }
@@ -4619,6 +4664,8 @@ static uint32 used_vertex_count(const MODEL_RESOURCE *model_input)
 
 uint32 model_reset_prim_colors(uint8 *groups)
 {
+    uint16 wire_halfword_1;
+
     uint32 flag;
     uint32 type;
     sint32 count;
@@ -4633,7 +4680,7 @@ uint32 model_reset_prim_colors(uint8 *groups)
     while (flag != 0)
     {
         type = groups[2];
-        count = (sint16)xport_load_le16(groups);
+        count = (sint16)(memcpy(&wire_halfword_1, groups, sizeof(wire_halfword_1)), wire_halfword_1);
         groups += 4;
         if (type <= 3)
         {
@@ -4658,6 +4705,8 @@ uint32 model_reset_prim_colors(uint8 *groups)
 
 uint32 model_set_gouraud_tex(const MODEL_PRIMITIVE_BUFFERS *streams, const MODEL_TEXTURE_SOURCE *tex, uint32 u_offset)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     const uint8 *groups;
     uint8 *packet0;
     uint8 *packet1;
@@ -4683,7 +4732,7 @@ uint32 model_set_gouraud_tex(const MODEL_PRIMITIVE_BUFFERS *streams, const MODEL
     do
     {
         type = groups[2];
-        count = (sint16)xport_load_le16(groups);
+        count = (sint16)(memcpy(&wire_halfword_1, groups, sizeof(wire_halfword_1)), wire_halfword_1);
         groups += 4;
         if (type <= 1)
         {
@@ -4717,10 +4766,10 @@ uint32 model_set_gouraud_tex(const MODEL_PRIMITIVE_BUFFERS *streams, const MODEL
                     gouraud_points[0] = ((POLY_GT4 *)packet0)->p;
                     gouraud_points[1] = ((POLY_GT4 *)packet1)->p;
                 }
-                val = tex->attributes != NULL ? tex->attributes->page : xport_load_le16(tex->resource + 8);
+                val = tex->attributes != NULL ? tex->attributes->page : (memcpy(&wire_halfword_2, tex->resource + 8, sizeof(wire_halfword_2)), wire_halfword_2);
                 gouraud_points[0][1].attr = (uint16)val;
                 gouraud_points[1][1].attr = (uint16)val;
-                val = tex->attributes != NULL ? tex->attributes->clut : xport_load_le16(tex->resource + 10);
+                val = tex->attributes != NULL ? tex->attributes->clut : (memcpy(&wire_halfword_3, tex->resource + 10, sizeof(wire_halfword_3)), wire_halfword_3);
                 gouraud_points[0][0].attr = (uint16)val;
                 gouraud_points[1][0].attr = (uint16)val;
                 for (buffer = 0; buffer < 2; ++buffer)
@@ -4751,6 +4800,8 @@ uint32 model_set_gouraud_tex(const MODEL_PRIMITIVE_BUFFERS *streams, const MODEL
 
 uint32 model_replace_tex_region(const MODEL_RESOURCE *model, const char *old_name, const char *new_name)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     const uint8 *old_tex_rec;
     const uint8 *old_tex;
     const uint8 *new_tex_rec;
@@ -4808,7 +4859,7 @@ uint32 model_replace_tex_region(const MODEL_RESOURCE *model, const char *old_nam
     packet_offset1 = ((const MODEL_HEADER *)model->bytes)->packet_offsets[1];
     XASSERT(!(groups_offset > model->capacity || packet_offset0 - groups_offset > model->capacity - groups_offset || model->capacity - groups_offset < 4));
     groups = model->bytes + groups_offset;
-    page = xport_load_le16(old_tex + 8);
+    page = (memcpy(&wire_halfword_1, old_tex + 8, sizeof(wire_halfword_1)), wire_halfword_1);
     left = ((old_u >> 2) + ((page << 6) & 0x3FF));
     old_v = old_tex[15];
     height = old_tex[13];
@@ -4825,7 +4876,7 @@ uint32 model_replace_tex_region(const MODEL_RESOURCE *model, const char *old_nam
     do
     {
         type = groups[2];
-        count = (sint16)xport_load_le16(groups);
+        count = (sint16)(memcpy(&wire_halfword_2, groups, sizeof(wire_halfword_2)), wire_halfword_2);
         groups += 4;
         if (type <= 3)
         {
@@ -4914,10 +4965,10 @@ uint32 model_replace_tex_region(const MODEL_RESOURCE *model, const char *old_nam
                                 tex_uv_state.last_v = last_v;
                         }
                     }
-                    val = xport_load_le16(new_tex + 8);
+                    val = (memcpy(&wire_halfword_3, new_tex + 8, sizeof(wire_halfword_3)), wire_halfword_3);
                     *page_fields[0] = val;
                     *page_fields[1] = val;
-                    val = xport_load_le16(new_tex + 10);
+                    val = (memcpy(&wire_halfword_4, new_tex + 10, sizeof(wire_halfword_4)), wire_halfword_4);
                     if (type == 3)
                         tex_uv_state.last_v = last_v;
                     *clut_fields[0] = val;
@@ -4963,5 +5014,6 @@ const uint8 *model_init_flare_tex(void)
     tex_rec = tex_find(flare_tex_names[1]);
     tex = tex_rec;
     flare_tex[1] = tex;
+    hd_flare_textures(flare_tex);
     return tex;
 }

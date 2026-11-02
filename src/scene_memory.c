@@ -79,6 +79,7 @@ static void pool_init(uint32 bytes)
     SCENE_BLOCK *blocks;
 
     FUNCTION_MARKER(0x8006B000, "SLUS_006.10");
+    hd_forget_span(scene_pool.base, scene_pool.bytes);
     XASSERT(!(bytes < 16 || (bytes & 15) != 0 || bytes > sizeof(game_resource_storage.scene_words)));
     blocks = (SCENE_BLOCK *)calloc(bytes / 16, sizeof(*blocks));
     XASSERT(!(blocks == NULL));
@@ -101,6 +102,7 @@ static void pool_compact(void)
     uint32 dst = 0, units;
 
     FUNCTION_MARKER(0x8006B074, "SLUS_006.10");
+    hd_forget_span(scene_pool.base, scene_pool.bytes);
     DrawSync(0);
     block = scene_pool.blocks;
     do
@@ -206,6 +208,7 @@ void scene_pool_free(uint8 *buffer)
     offset = (uint32)(address - begin - 16);
     block = scene_pool.blocks + offset / 16;
     XASSERT(!(block->allocated == 0 || block->owner == NULL || block->offset != offset));
+    hd_forget_span(buffer, (block->units - 1) * 16);
     block->allocated = 0;
     block->owner = NULL;
     prev = block->prev;
@@ -229,6 +232,8 @@ void scene_pool_free(uint8 *buffer)
 
 static void call_level_initializer(SCENE_LEVEL_SOURCE src)
 {
+    uint16 wire_halfword_1;
+
     SCENE_LEVEL_DESCRIPTOR *desc = &scene_level_image.desc;
     uint32 *fields[14] = {
         &desc->header_offset, &desc->prefix_offset, &desc->auxiliary_2_offset, &desc->lighting_offset, &desc->auxiliary_4_offset, &desc->auxiliary_5_offset, &desc->auxiliary_6_offset, &desc->stream_intervals_offset, &desc->environment_offset, &desc->effects_offset, &desc->camera_offset, &desc->checkpoints_offset, &desc->route_hints_offset, &desc->sky_ranges_offset,
@@ -243,7 +248,7 @@ static void call_level_initializer(SCENE_LEVEL_SOURCE src)
     {
         XASSERT(!(scene_level_image.size < 18));
         wire_base = 0x800A50B8;
-        address = 0x800A0000 + (uint32)(sint32)(sint16)xport_load_le16(scene_level_image.bytes + 16);
+        address = 0x800A0000 + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_1, scene_level_image.bytes + 16, sizeof(wire_halfword_1)), wire_halfword_1);
         XASSERT(!(address < wire_base));
         desc_offset = address - wire_base;
     }
@@ -268,6 +273,8 @@ static void call_level_initializer(SCENE_LEVEL_SOURCE src)
 
 void scene_load_level_metadata(void)
 {
+    uint16 wire_halfword_1;
+
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint32 selection, size, logical_size, val;
@@ -305,7 +312,7 @@ void scene_load_level_metadata(void)
     scene_level_image.asset_prefix = (const char *)(scene_level_image.bytes + (val));
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    val = (sint16)xport_load_le16(level_header + 0x10);
+    val = (sint16)(memcpy(&wire_halfword_1, level_header + 0x10, sizeof(wire_halfword_1)), wire_halfword_1);
     if (val >= 6)
         return;
     switch (val)
@@ -346,6 +353,8 @@ static void select_embedded_level(void)
 
 sint32 scene_load_race(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     uint32 wire_word_3;
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
@@ -370,6 +379,7 @@ sint32 scene_load_race(void)
     char filename[64];
 
     FUNCTION_MARKER(0x8001492C, "SLUS_006.10");
+    hd_reset();
     race_view.viewport = (uint32)(0);
     race_view.primary_car = (uint32)(0);
     if (race_session.linear_course != 0 || race_session.two_players != 0)
@@ -377,7 +387,7 @@ sint32 scene_load_race(void)
         level_desc = &scene_level_image.desc;
         XASSERT(!(scene_level_image.size < 6 || level_desc->checkpoints_offset > scene_level_image.size - 6));
         pointer = (uint8 *)(scene_level_image.bytes + level_desc->checkpoints_offset);
-        race_session.start_node = xport_load_le16(pointer + 4);
+        race_session.start_node = (memcpy(&wire_halfword_1, pointer + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     }
     else
     {
@@ -419,15 +429,15 @@ sint32 scene_load_race(void)
             level_desc = &scene_level_image.desc;
             XASSERT(!(scene_level_image.size < (idx + 1) * 4 + 2 || level_desc->checkpoints_offset > scene_level_image.size - ((idx + 1) * 4 + 2)));
             pointer = (uint8 *)(scene_level_image.bytes + level_desc->checkpoints_offset);
-            xport_store_le16(pointer + (idx + 1) * 4, (uint16)(150 + idx * 10));
+            (wire_halfword_2 = (uint16)((uint16)(150 + idx * 10)), memcpy(pointer + (idx + 1) * 4, &wire_halfword_2, sizeof(wire_halfword_2)));
         }
     }
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    near_distance = (sint16)xport_load_le16(level_header + 4);
+    near_distance = (sint16)(memcpy(&wire_halfword_3, level_header + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    far_distance = (sint16)xport_load_le16(level_header + 6);
+    far_distance = (sint16)(memcpy(&wire_halfword_4, level_header + 6, sizeof(wire_halfword_4)), wire_halfword_4);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
     r = level_header[0];
@@ -607,15 +617,16 @@ sint32 scene_load_race(void)
     camera_init_cues();
     race_control.stream_wait_marker = 1;
     presentation_wait_loading();
-    audio_fade();
     audio_load_car_samples(0);
     audio_load_car_samples(1);
-    audio_load_short_song((sint32)audio_state.race_song_counter % 13);
     audio_set_engine_volume(0);
     audio_start_engine(&car_states[0].pos, &car_states[0].velocity);
     audio_set_engine_volume(0);
     audio_prepare_aux_voices();
     audio_prepare_race_voices();
+    if (!race_session.linear_course)
+        asset_prepare_stream_cache(1);
+    hd_prepare_race_resources();
     audio_state.race_song_counter = audio_state.race_song_counter + 1;
     if (race_session.linear_course != 0)
         return audio_play_xa((sint32)race_session.track % 7 + 9);

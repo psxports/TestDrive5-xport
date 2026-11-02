@@ -58,6 +58,9 @@ static uint32 clip_mask(const XY *coord)
 
 static uint32 draw_model(uint8 *model_data, const sint8 *visibility)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const SKY_VERTEX *vertex_input;
     DISPLAY_ORDERING ordering;
     uint32 stream_offset, buffer, packet_offset, vertex_offset;
@@ -84,7 +87,7 @@ static uint32 draw_model(uint8 *model_data, const sint8 *visibility)
     ordering.byte_offset += limit * 4;
     for (;;)
     {
-        count = (sint16)xport_load_le16(prim);
+        count = (sint16)(memcpy(&wire_halfword_1, prim, sizeof(wire_halfword_1)), wire_halfword_1);
         kind = prim[2];
         val = kind * 4;
         if (count == 0)
@@ -99,19 +102,19 @@ static uint32 draw_model(uint8 *model_data, const sint8 *visibility)
             ++visibility;
             if (enabled != 0)
             {
-                idx0 = (sint16)xport_load_le16(prim);
-                idx1 = (sint16)xport_load_le16(prim + 2);
+                idx0 = (sint16)(memcpy(&wire_halfword_2, prim, sizeof(wire_halfword_2)), wire_halfword_2);
+                idx1 = (sint16)(memcpy(&wire_halfword_3, prim + 2, sizeof(wire_halfword_3)), wire_halfword_3);
                 vertex = vertices + idx0 * 8;
                 vertex_input = (const SKY_VERTEX *)vertex;
                 xport_gte_write_data(0, vertex_input->words[0]);
                 xport_gte_write_data(1, vertex_input->words[1]);
                 vertex = vertices + idx1 * 8;
-                idx2 = (sint16)xport_load_le16(prim + 4);
+                idx2 = (sint16)(memcpy(&wire_halfword_4, prim + 4, sizeof(wire_halfword_4)), wire_halfword_4);
                 vertex_input = (const SKY_VERTEX *)vertex;
                 xport_gte_write_data(2, vertex_input->words[0]);
                 xport_gte_write_data(3, vertex_input->words[1]);
                 vertex = vertices + idx2 * 8;
-                v3 = target == 0x80071EFC ? vertices + (uint32)(sint32)(sint16)xport_load_le16(prim + 6) * 8 : NULL;
+                v3 = target == 0x80071EFC ? vertices + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_5, prim + 6, sizeof(wire_halfword_5)), wire_halfword_5) * 8 : NULL;
                 vertex_input = (const SKY_VERTEX *)vertex;
                 xport_gte_write_data(4, vertex_input->words[0]);
                 xport_gte_write_data(5, vertex_input->words[1]);
@@ -157,6 +160,9 @@ static uint32 draw_model(uint8 *model_data, const sint8 *visibility)
 
 uint32 sky_draw(sint32 idx)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     VEC3 model_pos;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint8 *owner;
@@ -178,13 +184,13 @@ uint32 sky_draw(sint32 idx)
     {
         level_desc = &scene_level_image.desc;
         range = scene_level_image.bytes + (level_desc->sky_ranges_offset);
-        range_start = (sint16)xport_load_le16(range);
+        range_start = (sint16)(memcpy(&wire_halfword_1, range, sizeof(wire_halfword_1)), wire_halfword_1);
         node = (sint32)camera_views[(uint32)idx].track_node;
-        lower = xport_load_le16(range);
+        lower = (memcpy(&wire_halfword_2, range, sizeof(wire_halfword_2)), wire_halfword_2);
         selection = 0;
         while (range_start >= 0)
         {
-            if ((sint16)xport_load_le16(range + 2) < node)
+            if ((sint16)(memcpy(&wire_halfword_3, range + 2, sizeof(wire_halfword_3)), wire_halfword_3) < node)
                 break;
             if ((sint16)lower < node)
             {
@@ -192,8 +198,8 @@ uint32 sky_draw(sint32 idx)
                 break;
             }
             range += 8;
-            range_start = (sint16)xport_load_le16(range);
-            lower = xport_load_le16(range);
+            range_start = (sint16)(memcpy(&wire_halfword_4, range, sizeof(wire_halfword_4)), wire_halfword_4);
+            lower = (memcpy(&wire_halfword_5, range, sizeof(wire_halfword_5)), wire_halfword_5);
         }
     }
     for (grp = 0; grp < 3; ++grp)
@@ -212,9 +218,35 @@ uint32 sky_draw(sint32 idx)
                 model_pos.bits.y = ((const MODEL_HEADER *)model_data)->position.bits.y;
                 model_pos.bits.z = ((const MODEL_HEADER *)model_data)->position.bits.z;
                 model_transform_pos(&model_pos);
+                if (hd_capture_active())
+                {
+                    MODEL_RESOURCE resource = {model_data, scene_track_image.size - model_offset};
+                    hd_draw_sky(&resource, table);
+                }
                 draw_model(model_data, table);
+            }
+            else if (hd_capture_active())
+            {
+                MODEL_RESOURCE resource = {model_data, scene_track_image.size - model_offset};
+                hd_draw_static_candidate(&resource, table);
             }
         }
     }
     return 0;
+}
+
+void sky_prepare_hd(void)
+{
+    uint32 group, selection, item;
+    for (group = 0; group < 3; ++group)
+        for (selection = 0; selection < 3; ++selection)
+            for (item = 0; item < 6; ++item)
+            {
+                uint32 offset;
+                MODEL_RESOURCE resource;
+                memcpy(&offset, scene_track_image.bytes + 16 + group * 24 + item * 4, sizeof(offset));
+                XASSERT(offset <= scene_track_image.size && sizeof(MODEL_HEADER) <= scene_track_image.size - offset);
+                resource = (MODEL_RESOURCE){scene_track_image.bytes + offset, scene_track_image.size - offset};
+                hd_prepare_sky_model(&resource, sky_visibility[group][selection]);
+            }
 }

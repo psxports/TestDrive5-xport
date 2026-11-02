@@ -18,6 +18,65 @@ CHASE_STATE chase_state;
 
 static const char *const messages[8][2] = {{"SUSPECT IS WANTED FOR", "ARMED ROBBERY."}, {"SUSPECT IS WANTED FOR", "SPEEDING."}, {"SUSPECT IS ARMED", "AND DANGEROUS."}, {"SUSPECT IS WANTED", "FOR 1ST DEGREE MURDER."}, {"SUSPECT IS WANTED", "FOR ILLEGAL LICENSE PLATES."}, {"SUSPECT IS WANTED", "FOR GRAND THEFT AUTO."}, {"SUSPECT IS WANTED", "FOR CHICKEN PLUCKING."}, {"SUSPECT IS WANTED", "FOR SOFTWARE PIRACY."}};
 
+void chase_draw_hd_health(uint32 slot)
+{
+    const uint8 *tex;
+    const POLY_FT4 *icon;
+    const POLY_G4 *shade;
+    uint32 packet_bank, width, bar;
+    if (!hd_capture_active() || (race_session.cop_chase == 0 && race_session.multiplayer_mode != 3) || slot != chase_state.sel_slot)
+        return;
+    XASSERT(slot < 6);
+    packet_bank = disp_state.bank;
+    tex = hud_arrow_tex[0];
+    icon = &health_icons[packet_bank];
+    width = race_session.multiplayer_mode == 3 ? 7 : 10;
+    {
+        MATRIXF transform = hd_model_transform();
+        VECTORF anchor = {(float)health_anchor.vx, (float)health_anchor.vy, (float)health_anchor.vz}, position;
+        HD_UI_VERTEX vertices[4];
+        HD_TEXTURE texture = {((const TEXTURE_DESCRIPTOR *)tex)->page, ((const TEXTURE_DESCRIPTOR *)tex)->clut, tex[14], tex[15], tex[12], tex[13], HD_TEXTURED};
+        uint32 point, first;
+        float center_x, center_y;
+        RotTransf(&transform, &anchor, &position);
+        if (position.vz > 1.0f)
+        {
+            first = hd_ui_mark();
+            float scale = model_render.proj_distance * model_render.scale / 4096.0f / position.vz;
+            center_x = (sint32)model_render.view_center_x + position.vx * model_render.x_scale / 4096.0f * scale;
+            center_y = (sint32)model_render.view_center_y + position.vy * model_render.y_scale / 4096.0f * scale - 16.0f;
+            if ((icon->rgbc.code & 1) != 0)
+                texture.flags |= HD_RAW_TEXTURE;
+            if ((icon->rgbc.code & 2) != 0)
+                texture.flags |= HD_SEMITRANSPARENT;
+            for (point = 0; point < 4; ++point)
+            {
+                vertices[point].x = center_x + ((point & 1) != 0 ? tex[12] - 1.0f : 0.0f);
+                vertices[point].y = center_y - ((point & 2) != 0 ? 1.0f : (float)tex[13]);
+                vertices[point].u = tex[14] + ((point & 1) != 0 ? tex[12] - 1.0f : 0.0f);
+                vertices[point].v = tex[15] + ((point & 2) != 0 ? 0.0f : tex[13] - 1.0f);
+                memcpy(vertices[point].color, &icon->rgbc, 4);
+            }
+            hd_ui_ordered_quad(vertices, &texture, 1.0f, 4);
+            for (bar = 0; bar < 2; ++bar)
+            {
+                HD_TEXTURE solid = {0};
+                shade = bar == 0 ? &health_empty[packet_bank] : &health_fill[packet_bank];
+                if ((shade->p[0].rgbc.code & 2) != 0)
+                    solid.flags = HD_SEMITRANSPARENT;
+                for (point = 0; point < 4; ++point)
+                {
+                    vertices[point].x = center_x + tex[12] + ((point & 1) != 0 ? (float)width : 4.0f);
+                    vertices[point].y = center_y - tex[13] + ((point & 2) != 0 ? (bar == 0 ? tex[13] * (4096.0f - (sint16)chase_state.health[slot]) / 4096.0f : (float)tex[13]) : 0.0f);
+                    memcpy(vertices[point].color, &shade->p[point].rgbc, 4);
+                }
+                hd_ui_ordered_quad(vertices, &solid, 1.0f, 4);
+            }
+            hd_ui_follow_car(first, slot, &health_anchor);
+        }
+    }
+}
+
 uint32 chase_draw_health(uint32 slot)
 {
     DISPLAY_ORDERING ordering;
@@ -143,6 +202,7 @@ uint32 chase_draw_health(uint32 slot)
         result = (val & 0xFF000000) | gpu_packet_link((uintptr_t)shade);
         ordering.tags[(sint32)(ordering.byte_offset + (uint32)(16)) / 4] = result;
     }
+    chase_draw_hd_health(slot);
     return result;
 }
 
@@ -404,10 +464,10 @@ uint32 chase_init(void)
         extent = tex[13];
         prim->p[3].uv.v = (uint8)(val + extent + 255);
         tex = hud_arrow_tex[0];
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         prim->p[1].attr = (uint16)(val);
         tex = hud_arrow_tex[0];
-        val = xport_load_le16(tex + 10);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         prim->p[0].attr = (uint16)(val);
         val = prim->rgbc.code;
         prim->rgbc.code = (uint8)((val | 1) & 0xFD);

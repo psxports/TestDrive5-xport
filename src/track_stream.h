@@ -33,6 +33,9 @@ uint32 track_stream_draw_linear(uint32 slot);
 
 uint32 track_stream_draw(void);
 uint32 track_stream_init(void);
+uint32 track_stream_section_count(void);
+uint32 track_stream_variant(sint32 node, sint32 lane);
+sint32 track_stream_hd_resident(uint32 slot, uint32 section, uint32 variant);
 void track_stream_upload_images(void);
 uint32 track_stream_release_pending(void);
 uint32 track_stream_wait_for_load(void);

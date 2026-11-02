@@ -114,6 +114,8 @@ static uint32 draw_status_text(CAR_STATE *car);
 
 uint32 hud_init_scene(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     const uint8 *found_tex;
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
@@ -168,11 +170,11 @@ uint32 hud_init_scene(void)
         return val;
     idx = route_count;
     entries = route_entries;
-    val = xport_load_le16(entries + idx * 6);
+    val = (memcpy(&wire_halfword_1, entries + idx * 6, sizeof(wire_halfword_1)), wire_halfword_1);
     while (val != 0xFFFF)
     {
         ++idx;
-        val = xport_load_le16(entries + idx * 6);
+        val = (memcpy(&wire_halfword_2, entries + idx * 6, sizeof(wire_halfword_2)), wire_halfword_2);
         route_count = idx;
     }
     for (row = 0; row < 4; ++row)
@@ -253,9 +255,9 @@ uint32 hud_draw_digit(uint32 slot, sint32 digit, uint32 r, uint32 g, uint32 b)
     packet->p[2].xy.y = (sint16)(y + 11);
     packet->p[3].xy.x = (sint16)(x + 7);
     packet->p[3].xy.y = (sint16)(y + 11);
-    val = xport_load_le16(tex + 8);
+    val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     packet->p[1].attr = (uint16)(val);
-    attribute = xport_load_le16(tex + 10);
+    attribute = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     opcode = packet->rgbc.code;
     packet->rgbc.r = (uint8)(r);
     packet->rgbc.g = (uint8)(g);
@@ -271,6 +273,7 @@ uint32 hud_draw_digit(uint32 slot, sint32 digit, uint32 r, uint32 g, uint32 b)
     ordering.tags = cur_frame->ordering;
     ordering.byte_offset = 0;
     tag = ordering.tags[(sint32)(ordering.byte_offset + (uint32)(8)) / 4];
+    hd_ui_flat(packet->p, &packet->rgbc, 2);
     val = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
     ordering.tags[(sint32)(ordering.byte_offset + (uint32)(8)) / 4] = val;
     return val;
@@ -283,6 +286,8 @@ static void draw_route_symbol(uint32 item, uint32 y, uint32 view, uint32 shade)
 
 static uint32 update_route_hint(CAR_STATE *car, uint32 view)
 {
+    uint16 wire_halfword_1;
+
     uint32 node;
     uint32 cur;
     uint32 val;
@@ -316,7 +321,7 @@ static uint32 update_route_hint(CAR_STATE *car, uint32 view)
             data = route_entries;
             for (idx = 0; (sint32)idx < count; ++idx)
             {
-                if (xport_load_le16(data) == node)
+                if ((memcpy(&wire_halfword_1, data, sizeof(wire_halfword_1)), wire_halfword_1) == node)
                 {
                     route_views[view].sel_entry = idx;
                     route_views[view].hold_ticks = 120;
@@ -391,19 +396,17 @@ static void countdown_cue(sint32 val)
     FUNCTION_MARKER(0x80053028, "SLUS_006.10");
 }
 
-#if AP_WEB
 static sint32 play_race_xa(sint32 track)
 {
     SpuCommonAttr sound = {0};
     sint32 result = audio_play_xa(track);
 
-    /* Match the native VAG voice gain without a second half-volume CD stage */
+    // retain the former race voice gain through the CD mixer
     sound.mask = SPU_COMMON_CDVOLL | SPU_COMMON_CDVOLR;
     sound.cd.volume.left = sound.cd.volume.right = 0x7FFF;
     SpuSetCommonAttr(&sound);
     return result;
 }
-#endif
 
 const uint8 *hud_start_countdown(void)
 {
@@ -474,12 +477,8 @@ uint32 hud_update_countdown(void)
     val = race_session.two_players;
     if (val != 0)
         return val;
-#if AP_WEB
-    /* Rotate full race tracks independently of the selected circuit */
+    // rotate full race tracks independently of the selected circuit
     return (uint32)play_race_xa((sint32)((audio_state.race_song_counter - 1) % 8) + 8);
-#else
-    return (uint32)audio_play_request(13, 20, (sint32)audio_options.music_volume, 0, 0x1400);
-#endif
 }
 
 uint32 hud_init_drag_start(void)
@@ -533,6 +532,8 @@ static void set_drag_start_uv_tail(POLY_FT4 *packet, const uint8 *const *tex_han
 
 uint32 hud_draw_drag_start(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     static const sint32 full_y[4] = {-4, 34, 72, 110};
     static const sint32 split_y[4] = {-2, 17, 36, 55};
     uint32 slot, x, y, width, height, val;
@@ -562,8 +563,8 @@ uint32 hud_draw_drag_start(void)
     tex = drag_start.panel_tex;
     x = drag_start.origin_x;
     y = drag_start.origin_y;
-    packet->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-    val = xport_load_le16(tex + 0xA);
+    packet->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+    val = (memcpy(&wire_halfword_1, tex + 0xA, sizeof(wire_halfword_1)), wire_halfword_1);
     packet->p[0].xy.x = (sint16)(x);
     packet->p[0].xy.y = (sint16)(y);
     packet->p[0].attr = (uint16)(val);
@@ -582,8 +583,8 @@ uint32 hud_draw_drag_start(void)
         packet->tag = (packet->tag & 0x00FFFFFFu) | ((uint32)(uint8)(9) << 24);
         packet->rgbc.code = (uint8)(0x2C);
         tex = drag_start.lamp_tex;
-        packet->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-        val = xport_load_le16(tex + 0xA);
+        packet->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        val = (memcpy(&wire_halfword_2, tex + 0xA, sizeof(wire_halfword_2)), wire_halfword_2);
         color = drag_colors[i];
         packet->p[0].attr = (uint16)(val);
         packet->rgbc.r = (uint8)(color[0]);
@@ -613,8 +614,8 @@ uint32 hud_draw_drag_start(void)
     packet->tag = (packet->tag & 0x00FFFFFFu) | ((uint32)(uint8)(9) << 24);
     packet->rgbc.code = (uint8)(0x2E);
     tex = drag_start.active_tex;
-    packet->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-    packet->p[0].attr = (uint16)(xport_load_le16(tex + 0xA));
+    packet->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+    packet->p[0].attr = (uint16)((memcpy(&wire_halfword_3, tex + 0xA, sizeof(wire_halfword_3)), wire_halfword_3));
     packet->rgbc.r = (uint8)(drag_colors[0][0]);
     packet->rgbc.g = (uint8)(drag_colors[0][1]);
     packet->rgbc.b = (uint8)(drag_colors[0][2]);
@@ -706,6 +707,7 @@ uint32 hud_draw_drag_start(void)
         link = cur_frame->ordering[0];
         packet->tag = (tag & 0xFF000000) | (link & 0xFFFFFF);
         tag = cur_frame->ordering[0];
+        hd_ui_flat(packet->p, &packet->rgbc, 0);
         cur_frame->ordering[0] = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)packet);
         --packet_idx;
     }
@@ -786,10 +788,10 @@ uint32 hud_init_gauges(void)
         val = tex[15];
         other = tex[13];
         poly->p[3].uv.v = (uint8)(other + val - 1);
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         code = poly->rgbc.code;
         poly->p[1].attr = (uint16)(val);
-        clut = xport_load_le16(tex + 10);
+        clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->rgbc.code = (uint8)(code | 3);
         poly->p[0].attr = (uint16)(clut);
         for (idx = 0; idx < 2; ++idx)
@@ -841,8 +843,8 @@ uint32 hud_init_gauges(void)
             poly->p[3].xy.x = (sint16)(uint16)(right);
             poly->p[2].xy.y = (sint16)(uint16)(val + 199);
             poly->p[3].xy.y = (sint16)(uint16)(tex[13] + 199);
-            poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-            poly->p[0].attr = (uint16)(xport_load_le16(tex + 10));
+            poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+            poly->p[0].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
             code = poly->rgbc.code;
             poly->rgbc.code = (uint8)(code | 3);
         }
@@ -876,9 +878,9 @@ uint32 hud_init_gauges(void)
         poly->p[2].xy.y = (sint16)(uint16)(tex[13] + 211);
         poly->p[3].xy.x = (sint16)(uint16)(tex[12] + 408);
         poly->p[3].xy.y = (sint16)(uint16)(tex[13] + 211);
-        poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
+        poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
         code = poly->rgbc.code;
-        clut = xport_load_le16(tex + 10);
+        clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->rgbc.code = (uint8)(code | 3);
         poly->p[0].attr = (uint16)(clut);
         tex = tex_find("gears");
@@ -906,8 +908,8 @@ uint32 hud_init_gauges(void)
         poly->p[3].xy.x = (sint16)(uint16)(428);
         poly->p[2].xy.y = (sint16)(uint16)(val + 189);
         poly->p[3].xy.y = (sint16)(uint16)(tex[13] + 189);
-        poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-        poly->p[0].attr = (uint16)(xport_load_le16(tex + 10));
+        poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        poly->p[0].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
         code = poly->rgbc.code;
         poly->rgbc.code = (uint8)(code | 3);
         name = race_session.two_players != 0 ? "SmSpdo1" : "Speedo1";
@@ -940,9 +942,9 @@ uint32 hud_init_gauges(void)
         poly->p[2].xy.y = (sint16)(uint16)(tex[13] + 149);
         poly->p[3].xy.x = (sint16)(uint16)(tex[12] + 379);
         poly->p[3].xy.y = (sint16)(uint16)(tex[13] + 149);
-        poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
+        poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
         code = poly->rgbc.code;
-        clut = xport_load_le16(tex + 10);
+        clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         poly->rgbc.code = (uint8)(code | 3);
         poly->p[0].attr = (uint16)(clut);
         tex = tex_find("SpFont2");
@@ -970,9 +972,9 @@ uint32 hud_init_gauges(void)
             poly->p[3].xy.y = (sint16)(uint16)(47);
             tex = gauge_tex.checkpoint_font;
             code = poly->rgbc.code;
-            val = xport_load_le16(tex + 8);
+            val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             poly->p[1].attr = (uint16)(val);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             poly->rgbc.code = (uint8)((code | 1) & 0xFD);
             poly->p[0].attr = (uint16)(clut);
         }
@@ -1054,6 +1056,7 @@ static uint32 draw_large_gauges(CAR_STATE *car)
         shadow_poly->p[0].y = (sint16)(uint16)(y0 + 2);
         shadow_poly->p[1].y = (sint16)(uint16)(y1 + 2);
         shadow_poly->p[2].y = (sint16)(uint16)(y2 + 2);
+        hd_gauge_needle(car, pass, 436.0f, 187.0f, (float)radius, 3.0f, 2.0f / 3.0f, &needle_poly->rgbc, 0);
         disp_link_front_packet(cur_frame, &needle_poly->tag);
         ordering.tags = cur_frame->ordering;
         ordering.byte_offset = 0;
@@ -1070,6 +1073,7 @@ static uint32 draw_large_gauges(CAR_STATE *car)
         tag = ordering.tags[(sint32)(ordering.byte_offset + (uint32)(4)) / 4];
         if (pass == 1)
             next_idx = disp_state.bank;
+        hd_gauge_needle(car, pass, 436.0f, 189.0f, (float)radius, 3.0f, 2.0f / 3.0f, &shadow_poly->rgbc, 1);
         ordering.tags[(sint32)(ordering.byte_offset + (uint32)(4)) / 4] = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)shadow_poly);
         offset = next_idx * 20;
         needle_poly = &needle_packets.needle[1][offset / 20];
@@ -1114,6 +1118,7 @@ static uint32 draw_large_gauges(CAR_STATE *car)
     gauge_packets.gears[offset / 40].p[3].uv.v = (uint8)(v + height + 255);
     offset = disp_state.bank * 40;
     cur_frame = disp_state.cur;
+    hd_ui_flat(gauge_packets.gears[offset / 40].p, &gauge_packets.gears[offset / 40].rgbc, 0);
     disp_link_front_packet(cur_frame, &gauge_packets.gears[offset / 40].tag);
     speed = (sint32)car->forward_speed >> 8;
     if (speed < 0)
@@ -1166,6 +1171,7 @@ static uint32 draw_large_gauges(CAR_STATE *car)
             height = tex[13];
             poly->p[3].uv.v = (uint8)(v + height);
             cur_frame = disp_state.cur;
+            hd_ui_flat(poly->p, &poly->rgbc, 0);
             disp_link_front_packet(cur_frame, &poly->tag);
         }
         ++pos;
@@ -1174,7 +1180,9 @@ static uint32 draw_large_gauges(CAR_STATE *car)
     } while (pos < 3);
     offset = disp_state.bank * 40;
     cur_frame = disp_state.cur;
+    hd_ui_flat(gauge_packets.speed_units[offset / 40].p, &gauge_packets.speed_units[offset / 40].rgbc, 0);
     disp_link_front_packet(cur_frame, &gauge_packets.speed_units[offset / 40].tag);
+    hd_ui_flat(gauge_packets.speedometer[offset / 40].p, &gauge_packets.speedometer[offset / 40].rgbc, 0);
     return disp_link_front_packet(cur_frame, &gauge_packets.speedometer[offset / 40].tag);
 }
 
@@ -1250,6 +1258,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
         shadow_poly->p[0].y = (sint16)(uint16)(y0 + 2);
         shadow_poly->p[1].y = (sint16)(uint16)(y1 + 2);
         shadow_poly->p[2].y = (sint16)(uint16)(y2 + 2);
+        hd_gauge_needle(car, pass, (float)center_x, (float)center_y, pass == 0 ? 24.0f : 8.0f, 2.0f, 1.0f, &needle_poly->rgbc, 0);
         disp_link_front_packet(cur_frame, &needle_poly->tag);
         ordering.tags = cur_frame->ordering;
         ordering.byte_offset = 0;
@@ -1268,6 +1277,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
         {
             next_idx = disp_state.bank;
         }
+        hd_gauge_needle(car, pass, (float)center_x, (float)center_y + 2.0f, pass == 0 ? 24.0f : 8.0f, 2.0f, 1.0f, &shadow_poly->rgbc, 1);
         ordering.tags[(sint32)(ordering.byte_offset + (uint32)(4)) / 4] = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)shadow_poly);
         offset = next_idx * 20;
         needle_poly = &needle_packets.needle[1][offset / 20];
@@ -1323,6 +1333,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
     gauge_packets.gears[offset / 40].p[3].uv.v = (uint8)(v + height + 255);
     offset = disp_state.bank * 40;
     cur_frame = disp_state.cur;
+    hd_ui_flat(gauge_packets.gears[offset / 40].p, &gauge_packets.gears[offset / 40].rgbc, 0);
     disp_link_front_packet(cur_frame, &gauge_packets.gears[offset / 40].tag);
     speed = (sint32)car->forward_speed >> 8;
     if (speed < 0)
@@ -1386,6 +1397,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
             height = tex[13];
             poly->p[3].uv.v = (uint8)(v + height);
             cur_frame = disp_state.cur;
+            hd_ui_flat(poly->p, &poly->rgbc, 0);
             disp_link_front_packet(cur_frame, &poly->tag);
         }
         ++pos;
@@ -1416,6 +1428,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
     ordering.tags = cur_frame->ordering;
     ordering.byte_offset = 0;
     tag = ordering.tags[(sint32)ordering.byte_offset / 4];
+    hd_ui_flat(poly->p, &poly->rgbc, 0);
     val = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
     tex = gauge_tex.speedometer;
     ordering.tags[(sint32)ordering.byte_offset / 4] = val;
@@ -1432,6 +1445,7 @@ static uint32 draw_small_gauges(CAR_STATE *car, uint32 parameter)
     poly->p[3].xy.x = (sint16)(uint16)(base_x + val - 1);
     val = tex[13];
     poly->p[3].xy.y = (sint16)(uint16)(base_y + val - 1);
+    hd_ui_flat(poly->p, &poly->rgbc, 0);
     return disp_link_front_packet(cur_frame, &poly->tag);
 }
 
@@ -1496,6 +1510,7 @@ static uint32 draw_checkpoint_timer(void)
         poly = &gauge_packets.checkpoint[offset / 120][0];
         for (pos = 0; pos < 3; ++pos)
         {
+            hd_ui_flat(poly->p, &poly->rgbc, 0);
             disp_link_front_packet(cur_frame, &poly->tag);
             ++poly;
         }
@@ -1598,6 +1613,7 @@ static uint32 draw_reverse_indicator(CAR_STATE *car)
             ordering.tags = cur_frame->ordering;
             ordering.byte_offset = 0;
             tag = ordering.tags[(sint32)(ordering.byte_offset + (uint32)(8)) / 4];
+            hd_ui_flat(poly->p, &poly->rgbc, 2);
             ordering.tags[(sint32)(ordering.byte_offset + (uint32)(8)) / 4] = (tag & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
         }
     }
@@ -1658,8 +1674,8 @@ uint32 hud_init_race_text(void)
         poly->rgbc.r = (uint8)(255);
         poly->rgbc.g = (uint8)(255);
         poly->rgbc.b = (uint8)(0);
-        poly->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-        poly->p[0].attr = (uint16)(xport_load_le16(tex + 10));
+        poly->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        poly->p[0].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
     }
     return draw_status_text(&car_states[0]);
 }
@@ -1779,6 +1795,7 @@ uint32 hud_link_race_text(uint32 prev_result)
         head.tags = cur_frame->ordering;
         head.byte_offset = 0;
         head_tag = head.tags[(sint32)head.byte_offset / 4];
+        hd_ui_flat(poly->p, &poly->rgbc, 0);
         head.tags[(sint32)head.byte_offset / 4] = (head_tag & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
         buffer += 2;
     }
@@ -1983,7 +2000,9 @@ uint32 hud_draw_full_view(CAR_STATE *car)
             draw_route_hints(car, 0);
             minimap_draw(car);
         }
+        hd_ui_anchor(1);
         draw_large_gauges(car);
+        hd_ui_anchor(0);
         if (race_rules.checkpoint_timers != 0)
             draw_checkpoint_timer();
     }
@@ -1999,7 +2018,9 @@ uint32 hud_draw_split_view(CAR_STATE *car, uint32 parameter)
     if (race_session.demo == 0)
     {
         draw_reverse_indicator(car);
+        hd_ui_anchor(1);
         draw_small_gauges(car, parameter);
+        hd_ui_anchor(0);
     }
     result = draw_status_text(car);
     return hud_link_race_text(result);

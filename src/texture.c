@@ -43,8 +43,37 @@ uint8 *tex_find(const char *name)
     return NULL;
 }
 
+sint32 tex_find_region(uint16 page, uint16 clut, uint16 min_u, uint16 min_v, uint16 max_u, uint16 max_v, TEXTURE_REGION *region)
+{
+    uint32 offset, area = 0xFFFFFFFFu;
+    sint32 found = 0;
+    for (offset = 0; texture_table.entries != NULL && offset + 16 <= texture_table.capacity; offset += 16)
+    {
+        const uint8 *entry = texture_table.entries + offset;
+        uint16 entry_page, entry_clut;
+        uint32 width, height;
+        if (entry[0] == 0)
+            break;
+        memcpy(&entry_page, entry + 8, sizeof(entry_page));
+        memcpy(&entry_clut, entry + 10, sizeof(entry_clut));
+        width = entry[12] != 0 ? entry[12] : 256;
+        height = entry[13] != 0 ? entry[13] : 256;
+        if ((page & 0x19F) != (entry_page & 0x19F) || clut != entry_clut || min_u < entry[14] || min_v < entry[15] || max_u >= entry[14] + width || max_v >= entry[15] + height || width * height >= area)
+            continue;
+        region->u = entry[14];
+        region->v = entry[15];
+        region->width = (uint16)width;
+        region->height = (uint16)height;
+        area = width * height;
+        found = 1;
+    }
+    return found;
+}
+
 sint32 tex_upload_tim(const uint8 *image, uint32 capacity, sint16 image_x, sint16 image_y, sint16 pal_x, sint16 pal_y)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     uint32 wire_word_1, wire_word_2, wire_word_3;
     PSX_RECT rect;
     uint32 block;
@@ -59,8 +88,8 @@ sint32 tex_upload_tim(const uint8 *image, uint32 capacity, sint16 image_x, sint1
     XASSERT(!(capacity - 4 < 16));
     rect.x = pal_x;
     rect.y = pal_y;
-    rect.w = (sint16)xport_load_le16(image + block + 8);
-    rect.h = (sint16)xport_load_le16(image + block + 10);
+    rect.w = (sint16)(memcpy(&wire_halfword_1, image + block + 8, sizeof(wire_halfword_1)), wire_halfword_1);
+    rect.h = (sint16)(memcpy(&wire_halfword_2, image + block + 10, sizeof(wire_halfword_2)), wire_halfword_2);
     bytes = rect.w > 0 && rect.h > 0 ? (uint32)rect.w * (uint32)rect.h * 2 : 0;
     XASSERT(!(bytes > capacity - block - 12));
     LoadImagePSX(&rect, (uint32 *)(image + block + 12));
@@ -73,8 +102,8 @@ sint32 tex_upload_tim(const uint8 *image, uint32 capacity, sint16 image_x, sint1
         XASSERT(!(capacity - block < 12));
         rect.x = image_x;
         rect.y = image_y;
-        rect.w = (sint16)xport_load_le16(image + block + 8);
-        rect.h = (sint16)xport_load_le16(image + block + 10);
+        rect.w = (sint16)(memcpy(&wire_halfword_3, image + block + 8, sizeof(wire_halfword_3)), wire_halfword_3);
+        rect.h = (sint16)(memcpy(&wire_halfword_4, image + block + 10, sizeof(wire_halfword_4)), wire_halfword_4);
         bytes = rect.w > 0 && rect.h > 0 ? (uint32)rect.w * (uint32)rect.h * 2 : 0;
         XASSERT(!(bytes > capacity - block - 12));
         LoadImagePSX(&rect, (uint32 *)(image + block + 12));

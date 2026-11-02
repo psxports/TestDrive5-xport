@@ -61,5 +61,7 @@ void car_init_speed_smoke_packets(void);
 uint32 car_init_police_light_packets(void);
 uint32 car_update_police_light_phases(void);
 void car_select_police_lights(sint32 selection);
+void car_draw_hd_shadow(uint32 slot, uint32 kind);
+void car_draw_hd_candidate_lamps(uint32 slot, float police_signal);
 
 #endif

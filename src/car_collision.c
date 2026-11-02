@@ -95,6 +95,8 @@ uint32 car_truncate_shift(uint32 val, uint32 bits)
 
 static uint32 boundary_response(CAR_STATE *car, const uint8 *other, const uint8 *anchor, uint32 penetration)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     sint32 other_z;
     sint32 anchor_z;
     sint32 other_x;
@@ -113,10 +115,10 @@ static uint32 boundary_response(CAR_STATE *car, const uint8 *other, const uint8 
     uint32 n;
 
     race_apply_point_penalty(car, 1);
-    other_z = (sint16)xport_load_le16(other + 4);
-    anchor_z = (sint16)xport_load_le16(anchor + 4);
-    other_x = (sint16)xport_load_le16(other);
-    anchor_x = (sint16)xport_load_le16(anchor);
+    other_z = (sint16)(memcpy(&wire_halfword_1, other + 4, sizeof(wire_halfword_1)), wire_halfword_1);
+    anchor_z = (sint16)(memcpy(&wire_halfword_2, anchor + 4, sizeof(wire_halfword_2)), wire_halfword_2);
+    other_x = (sint16)(memcpy(&wire_halfword_3, other, sizeof(wire_halfword_3)), wire_halfword_3);
+    anchor_x = (sint16)(memcpy(&wire_halfword_4, anchor, sizeof(wire_halfword_4)), wire_halfword_4);
     angle = fixed_angle_from_vector(other_z - anchor_z, other_x - anchor_x);
     c = (uint32)rcos(angle);
     s = (uint32)rsin(angle);
@@ -151,6 +153,8 @@ static uint32 boundary_response(CAR_STATE *car, const uint8 *other, const uint8 
 
 static uint32 boundary_contact(CAR_STATE *car, const uint8 *anchor, const uint8 *other, uint32 extent, SVECTOR *n)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 coord;
     uint32 origin;
     uint32 product;
@@ -159,11 +163,11 @@ static uint32 boundary_contact(CAR_STATE *car, const uint8 *anchor, const uint8 
 
     VectorNormalSS(n, n);
     coord = car->pos.bits.x;
-    origin = (sint16)xport_load_le16(anchor);
+    origin = (sint16)(memcpy(&wire_halfword_1, anchor, sizeof(wire_halfword_1)), wire_halfword_1);
     coord = (uint32)((sint32)coord >> 8) - origin;
     product = coord * (uint32)(sint32)n->vx;
     coord = car->pos.bits.z;
-    origin = (sint16)xport_load_le16(anchor + 4);
+    origin = (sint16)(memcpy(&wire_halfword_2, anchor + 4, sizeof(wire_halfword_2)), wire_halfword_2);
     z_delta = (uint32)((sint32)coord >> 8) - origin;
     penetration = product + z_delta * (uint32)(sint32)n->vz - extent;
     if ((sint32)penetration >= 0)
@@ -173,6 +177,8 @@ static uint32 boundary_contact(CAR_STATE *car, const uint8 *anchor, const uint8 
 
 static sint32 road_distance(CAR_STATE *car, const uint8 *anchor, const uint8 *seg, uint32 extent, SVECTOR *n, uint32 *z_delta)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 coord;
     uint32 vertex;
     uint32 origin;
@@ -180,12 +186,12 @@ static sint32 road_distance(CAR_STATE *car, const uint8 *anchor, const uint8 *se
 
     VectorNormalSS(n, n);
     coord = car->pos.bits.x;
-    vertex = (sint16)xport_load_le16(anchor);
+    vertex = (sint16)(memcpy(&wire_halfword_1, anchor, sizeof(wire_halfword_1)), wire_halfword_1);
     memcpy(&origin, seg + 12, sizeof(origin));
     coord = (uint32)((sint32)coord >> 8) - vertex - origin;
     product = coord * (uint32)(sint32)n->vx;
     coord = car->pos.bits.z;
-    vertex = (sint16)xport_load_le16(anchor + 4);
+    vertex = (sint16)(memcpy(&wire_halfword_2, anchor + 4, sizeof(wire_halfword_2)), wire_halfword_2);
     memcpy(&origin, seg + 20, sizeof(origin));
     *z_delta = (uint32)((sint32)coord >> 8) - vertex - origin;
     return (product + *z_delta * (uint32)(sint32)n->vz - extent);
@@ -193,6 +199,10 @@ static sint32 road_distance(CAR_STATE *car, const uint8 *anchor, const uint8 *se
 
 static uint32 resolve_road_boundary(uint32 slot)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+
     CAR_STATE *car;
     const uint8 *base;
     uint32 lane;
@@ -243,20 +253,20 @@ static uint32 resolve_road_boundary(uint32 slot)
 
         base = track_geometry.node_bytes;
         bound_x = (uint32)car_body_points[slot][1].vx;
-        idx0 = xport_load_le16(base + seg_offset + 6);
+        idx0 = (memcpy(&wire_halfword_1, base + seg_offset + 6, sizeof(wire_halfword_1)), wire_halfword_1);
         points = track_geometry.vertex_bytes;
-        idx1 = xport_load_le16(base + seg_offset + 4);
+        idx1 = (memcpy(&wire_halfword_2, base + seg_offset + 4, sizeof(wire_halfword_2)), wire_halfword_2);
         XASSERT(!((uint32)(idx0) >= track_geometry.vertex_count));
         anchor = points + idx0 * 6;
         XASSERT(!((uint32)(idx1) >= track_geometry.vertex_count));
         other = points + idx1 * 6;
         bound_z = (uint32)car_body_points[slot][1].vz;
-        z0 = xport_load_le16(other + 4);
-        z1 = xport_load_le16(anchor + 4);
+        z0 = (memcpy(&wire_halfword_3, other + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        z1 = (memcpy(&wire_halfword_4, anchor + 4, sizeof(wire_halfword_4)), wire_halfword_4);
         n.vy = 0;
         n.vx = (sint16)(z0 - z1);
-        x0 = xport_load_le16(other);
-        x1 = xport_load_le16(anchor);
+        x0 = (memcpy(&wire_halfword_5, other, sizeof(wire_halfword_5)), wire_halfword_5);
+        x1 = (memcpy(&wire_halfword_6, anchor, sizeof(wire_halfword_6)), wire_halfword_6);
         n.vz = (sint16)(x1 - x0);
         extent = c * bound_x + s * bound_z;
         penetration = road_distance(car, anchor, seg, extent, &n, &z_delta);
@@ -278,22 +288,22 @@ static uint32 resolve_road_boundary(uint32 slot)
 
     XASSERT(!(type >= 12));
     adjust = track_boundary_offsets[type].vertex_offset0;
-    idx0 = xport_load_le16(base + seg_offset + 4);
+    idx0 = (memcpy(&wire_halfword_7, base + seg_offset + 4, sizeof(wire_halfword_7)), wire_halfword_7);
     points = track_geometry.vertex_bytes;
     bound_x = (uint32)car_body_points[slot][1].vx;
-    idx1 = xport_load_le16(base + seg_offset + 6);
+    idx1 = (memcpy(&wire_halfword_8, base + seg_offset + 6, sizeof(wire_halfword_8)), wire_halfword_8);
     XASSERT(!((uint32)((idx0 + count + adjust)) >= track_geometry.vertex_count));
     anchor = points + (idx0 + count + adjust) * 6;
     adjust = track_boundary_offsets[type].vertex_offset1;
-    z0 = xport_load_le16(anchor + 4);
+    z0 = (memcpy(&wire_halfword_9, anchor + 4, sizeof(wire_halfword_9)), wire_halfword_9);
     XASSERT(!((uint32)((idx1 + count + adjust)) >= track_geometry.vertex_count));
     other = points + (idx1 + count + adjust) * 6;
     bound_z = (uint32)car_body_points[slot][1].vz;
-    z1 = xport_load_le16(other + 4);
+    z1 = (memcpy(&wire_halfword_10, other + 4, sizeof(wire_halfword_10)), wire_halfword_10);
     n.vy = 0;
     n.vx = (sint16)(z1 - z0);
-    x0 = xport_load_le16(other);
-    x1 = xport_load_le16(anchor);
+    x0 = (memcpy(&wire_halfword_11, other, sizeof(wire_halfword_11)), wire_halfword_11);
+    x1 = (memcpy(&wire_halfword_12, anchor, sizeof(wire_halfword_12)), wire_halfword_12);
     n.vz = (sint16)(x1 - x0);
     extent = c * bound_x + s * bound_z;
     penetration = road_distance(car, anchor, seg, extent, &n, &z_delta);
@@ -304,6 +314,9 @@ static uint32 resolve_road_boundary(uint32 slot)
 
 static uint32 resolve_end_boundary(uint32 slot)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     CAR_STATE *car;
     uint32 idx;
     uint32 angle;
@@ -347,24 +360,27 @@ static uint32 resolve_end_boundary(uint32 slot)
     XASSERT(!((uint32)seg_idx >= track_geometry.node_count));
     seg = base + seg_idx * 24;
     count = (seg + 3)[0];
-    vertex = xport_load_le16(seg + 4);
+    vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     base = track_geometry.vertex_bytes;
     XASSERT(!((uint32)((vertex + (count & 15))) >= track_geometry.vertex_count));
     high = base + (vertex + (count & 15)) * 6;
     XASSERT(!((uint32)(vertex) >= track_geometry.vertex_count));
     low = base + vertex * 6;
-    low_z = xport_load_le16(low + 4);
-    high_z = xport_load_le16(high + 4);
+    low_z = (memcpy(&wire_halfword_2, low + 4, sizeof(wire_halfword_2)), wire_halfword_2);
+    high_z = (memcpy(&wire_halfword_3, high + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     n.vy = 0;
     n.vx = (sint16)(low_z - high_z);
-    high_x = xport_load_le16(high);
-    low_x = xport_load_le16(low);
+    high_x = (memcpy(&wire_halfword_4, high, sizeof(wire_halfword_4)), wire_halfword_4);
+    low_x = (memcpy(&wire_halfword_5, low, sizeof(wire_halfword_5)), wire_halfword_5);
     n.vz = (sint16)(high_x - low_x);
     return boundary_contact(car, high, low, extent, &n);
 }
 
 static uint32 resolve_start_boundary(uint32 slot)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     CAR_STATE *car;
     uint32 seg_idx;
     const uint8 *seg;
@@ -407,7 +423,7 @@ static uint32 resolve_start_boundary(uint32 slot)
 
     count = (seg + 3)[0];
     body_x = (uint32)car_body_points[slot][1].vx;
-    vertex = xport_load_le16(seg + 4);
+    vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     body_z = (uint32)car_body_points[slot][1].vz;
     base = track_geometry.vertex_bytes;
     extent = s * body_x + c * body_z;
@@ -415,18 +431,21 @@ static uint32 resolve_start_boundary(uint32 slot)
     low = base + vertex * 6;
     XASSERT(!((uint32)((vertex + (count & 15))) >= track_geometry.vertex_count));
     high = base + (vertex + (count & 15)) * 6;
-    high_z = xport_load_le16(high + 4);
-    low_z = xport_load_le16(low + 4);
+    high_z = (memcpy(&wire_halfword_2, high + 4, sizeof(wire_halfword_2)), wire_halfword_2);
+    low_z = (memcpy(&wire_halfword_3, low + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     n.vy = 0;
     n.vx = (sint16)(high_z - low_z);
-    high_x = xport_load_le16(high);
-    low_x = xport_load_le16(low);
+    high_x = (memcpy(&wire_halfword_4, high, sizeof(wire_halfword_4)), wire_halfword_4);
+    low_x = (memcpy(&wire_halfword_5, low, sizeof(wire_halfword_5)), wire_halfword_5);
     n.vz = (sint16)(low_x - high_x);
     return boundary_contact(car, low, high, extent, &n);
 }
 
 static sint32 edge_distance(const VEC3 *point, const uint8 *v0, const uint8 *v1, const uint8 *seg, sint32 z1)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     uint32 wire_word_3, wire_word_4;
     VECTOR n;
     sint32 z0;
@@ -436,20 +455,20 @@ static sint32 edge_distance(const VEC3 *point, const uint8 *v0, const uint8 *v1,
     uint32 origin;
     uint32 product;
 
-    z0 = (sint16)xport_load_le16(v0 + 4);
+    z0 = (sint16)(memcpy(&wire_halfword_1, v0 + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     n.vy = 0;
     n.vx = z1 - z0;
-    x0 = (sint16)xport_load_le16(v0);
-    x1 = (sint16)xport_load_le16(v1);
+    x0 = (sint16)(memcpy(&wire_halfword_2, v0, sizeof(wire_halfword_2)), wire_halfword_2);
+    x1 = (sint16)(memcpy(&wire_halfword_3, v1, sizeof(wire_halfword_3)), wire_halfword_3);
     n.vz = x0 - x1;
     VectorNormal(&n, &n);
     coord = ((sint32)point->bits.x >> 8);
-    origin = (sint16)xport_load_le16(v0);
+    origin = (sint16)(memcpy(&wire_halfword_4, v0, sizeof(wire_halfword_4)), wire_halfword_4);
     coord -= origin;
     coord -= (memcpy(&wire_word_3, seg + 12, sizeof(wire_word_3)), wire_word_3);
     product = coord * (uint32)n.vx;
     coord = ((sint32)point->bits.z >> 8);
-    origin = (sint16)xport_load_le16(v0 + 4);
+    origin = (sint16)(memcpy(&wire_halfword_5, v0 + 4, sizeof(wire_halfword_5)), wire_halfword_5);
     coord -= origin;
     coord -= (memcpy(&wire_word_4, seg + 20, sizeof(wire_word_4)), wire_word_4);
     return (product + coord * (uint32)n.vz);
@@ -457,21 +476,25 @@ static sint32 edge_distance(const VEC3 *point, const uint8 *v0, const uint8 *v1,
 
 static sint32 edge_angle(CAR_STATE *car, const uint8 *v0, const uint8 *v1)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     sint32 z1;
     sint32 z0;
     sint32 x1;
     sint32 x0;
 
     race_apply_point_penalty(car, 1);
-    z1 = (sint16)xport_load_le16(v1 + 4);
-    z0 = (sint16)xport_load_le16(v0 + 4);
-    x1 = (sint16)xport_load_le16(v1);
-    x0 = (sint16)xport_load_le16(v0);
+    z1 = (sint16)(memcpy(&wire_halfword_1, v1 + 4, sizeof(wire_halfword_1)), wire_halfword_1);
+    z0 = (sint16)(memcpy(&wire_halfword_2, v0 + 4, sizeof(wire_halfword_2)), wire_halfword_2);
+    x1 = (sint16)(memcpy(&wire_halfword_3, v1, sizeof(wire_halfword_3)), wire_halfword_3);
+    x0 = (sint16)(memcpy(&wire_halfword_4, v0, sizeof(wire_halfword_4)), wire_halfword_4);
     return fixed_angle_from_vector(z1 - z0, x1 - x0);
 }
 
 static uint32 resolve_end_contacts(uint32 slot, CAR_COLLISION_CALLBACK callback, const sint8 *list)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     CAR_STATE *car;
     uint32 result;
     uint32 idx;
@@ -509,13 +532,13 @@ static uint32 resolve_end_contacts(uint32 slot, CAR_COLLISION_CALLBACK callback,
             XASSERT(!((uint32)(uint32)node >= track_geometry.node_count));
             seg = base + (uint32)node * 24;
             count = (seg + 3)[0];
-            vertex = xport_load_le16(seg + 4);
+            vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
             base = track_geometry.vertex_bytes;
             XASSERT(!((uint32)((vertex + (count & 15))) >= track_geometry.vertex_count));
             v0 = base + (vertex + (count & 15)) * 6;
             XASSERT(!((uint32)(vertex) >= track_geometry.vertex_count));
             v1 = base + vertex * 6;
-            z1 = (sint16)xport_load_le16(v1 + 4);
+            z1 = (sint16)(memcpy(&wire_halfword_2, v1 + 4, sizeof(wire_halfword_2)), wire_halfword_2);
             point = &car->body_contact_pos[(uint32)sel];
             distance = edge_distance(point, v0, v1, seg, z1);
             if (distance < 0)
@@ -532,6 +555,8 @@ static uint32 resolve_end_contacts(uint32 slot, CAR_COLLISION_CALLBACK callback,
 
 static uint32 resolve_start_contacts(uint32 slot, CAR_COLLISION_CALLBACK callback, const sint8 *list)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     CAR_STATE *car;
     uint32 result;
     uint32 idx;
@@ -569,13 +594,13 @@ static uint32 resolve_start_contacts(uint32 slot, CAR_COLLISION_CALLBACK callbac
             XASSERT(!((uint32)boundary >= track_geometry.node_count));
             seg = base + boundary * 24;
             count = (seg + 3)[0];
-            vertex = xport_load_le16(seg + 4);
+            vertex = (memcpy(&wire_halfword_1, seg + 4, sizeof(wire_halfword_1)), wire_halfword_1);
             base = track_geometry.vertex_bytes;
             XASSERT(!((uint32)(vertex) >= track_geometry.vertex_count));
             v0 = base + vertex * 6;
             XASSERT(!((uint32)((vertex + (count & 15))) >= track_geometry.vertex_count));
             v1 = base + (vertex + (count & 15)) * 6;
-            z1 = (sint16)xport_load_le16(v1 + 4);
+            z1 = (sint16)(memcpy(&wire_halfword_2, v1 + 4, sizeof(wire_halfword_2)), wire_halfword_2);
             point = &car->body_contact_pos[(uint32)sel];
             distance = edge_distance(point, v0, v1, seg, z1);
             if (distance < 0)
@@ -592,6 +617,10 @@ static uint32 resolve_start_contacts(uint32 slot, CAR_COLLISION_CALLBACK callbac
 
 static intptr_t resolve_road_contacts(uint32 slot, CAR_COLLISION_CALLBACK callback, const sint8 *list)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11;
+
     uint32 wire_word_5, wire_word_6;
     CAR_STATE *car;
     uint32 idx;
@@ -634,14 +663,14 @@ static intptr_t resolve_road_contacts(uint32 slot, CAR_COLLISION_CALLBACK callba
         point = &car->body_contact_pos[(uint32)sel];
         if (lane == 0)
         {
-            other_vertex = xport_load_le16(seg + 6);
+            other_vertex = (memcpy(&wire_halfword_1, seg + 6, sizeof(wire_halfword_1)), wire_halfword_1);
             base = track_geometry.vertex_bytes;
-            vertex = xport_load_le16(seg + 4);
+            vertex = (memcpy(&wire_halfword_2, seg + 4, sizeof(wire_halfword_2)), wire_halfword_2);
             XASSERT(!((uint32)(other_vertex) >= track_geometry.vertex_count));
             v0 = base + other_vertex * 6;
             XASSERT(!((uint32)(vertex) >= track_geometry.vertex_count));
             v1 = base + vertex * 6;
-            z1 = (sint16)xport_load_le16(v1 + 4);
+            z1 = (sint16)(memcpy(&wire_halfword_3, v1 + 4, sizeof(wire_halfword_3)), wire_halfword_3);
             side = 1;
         }
         else
@@ -649,19 +678,19 @@ static intptr_t resolve_road_contacts(uint32 slot, CAR_COLLISION_CALLBACK callba
             if ((sint32)lane < (sint32)(count - 1))
                 continue;
             type = seg[0];
-            vertex = xport_load_le16(seg + 4);
+            vertex = (memcpy(&wire_halfword_4, seg + 4, sizeof(wire_halfword_4)), wire_halfword_4);
             XASSERT(!(type >= 12));
             offset = track_boundary_offsets[type].vertex_offset0;
             base = track_geometry.vertex_bytes;
             other_offset = track_boundary_offsets[type].vertex_offset1;
             XASSERT(!((uint32)((vertex + count + offset)) >= track_geometry.vertex_count));
             v0 = base + (vertex + count + offset) * 6;
-            other_vertex = xport_load_le16(seg + 6);
+            other_vertex = (memcpy(&wire_halfword_5, seg + 6, sizeof(wire_halfword_5)), wire_halfword_5);
             /* The first vertex Z precedes the second vertex address calculation */
-            distance = (sint16)xport_load_le16(v0 + 4);
+            distance = (sint16)(memcpy(&wire_halfword_6, v0 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
             XASSERT(!((uint32)((other_vertex + count + other_offset)) >= track_geometry.vertex_count));
             v1 = base + (other_vertex + count + other_offset) * 6;
-            z1 = (sint16)xport_load_le16(v1 + 4);
+            z1 = (sint16)(memcpy(&wire_halfword_7, v1 + 4, sizeof(wire_halfword_7)), wire_halfword_7);
             side = 2;
         }
         if (side == 1)
@@ -678,17 +707,17 @@ static intptr_t resolve_road_contacts(uint32 slot, CAR_COLLISION_CALLBACK callba
 
             n.vy = 0;
             n.vx = z1 - distance;
-            x0 = (sint16)xport_load_le16(v0);
-            x1 = (sint16)xport_load_le16(v1);
+            x0 = (sint16)(memcpy(&wire_halfword_8, v0, sizeof(wire_halfword_8)), wire_halfword_8);
+            x1 = (sint16)(memcpy(&wire_halfword_9, v1, sizeof(wire_halfword_9)), wire_halfword_9);
             n.vz = x0 - x1;
             VectorNormal(&n, &n);
             coord = ((sint32)point->bits.x >> 8);
-            origin = (sint16)xport_load_le16(v0);
+            origin = (sint16)(memcpy(&wire_halfword_10, v0, sizeof(wire_halfword_10)), wire_halfword_10);
             coord -= origin;
             coord -= (memcpy(&wire_word_5, seg + 12, sizeof(wire_word_5)), wire_word_5);
             product = coord * (uint32)n.vx;
             coord = ((sint32)point->bits.z >> 8);
-            origin = (sint16)xport_load_le16(v0 + 4);
+            origin = (sint16)(memcpy(&wire_halfword_11, v0 + 4, sizeof(wire_halfword_11)), wire_halfword_11);
             coord -= origin;
             coord -= (memcpy(&wire_word_6, seg + 20, sizeof(wire_word_6)), wire_word_6);
             distance = (product + coord * (uint32)n.vz);
@@ -2543,6 +2572,8 @@ static uint32 apply_contact_impact(CAR_STATE *car, const VEC3 *point, sint32 ang
 
 static uint32 apply_contact_forces(CAR_STATE *car)
 {
+    uint16 wire_halfword_1;
+
     uint32 wire_word_8;
     MATRIX transpose = {0};
     uint32 mask;
@@ -2582,7 +2613,7 @@ static uint32 apply_contact_forces(CAR_STATE *car)
     TransposeMatrix(&car->transform, &transpose);
     for (idx = 0; idx < 4; ++idx)
         xport_gte_write_control(idx, (memcpy(&wire_word_8, (const uint8 *)&transpose + idx * 4, sizeof(wire_word_8)), wire_word_8));
-    xport_gte_write_control(4, xport_load_le16((const uint8 *)&transpose + 16));
+    xport_gte_write_control(4, (memcpy(&wire_halfword_1, (const uint8 *)&transpose + 16, sizeof(wire_halfword_1)), wire_halfword_1));
     for (idx = 0; idx < 4; ++idx)
     {
         if (((mask >> idx) & 1) == 0)
@@ -4366,6 +4397,8 @@ uint32 car_update_pair_cols(void)
 
 uint32 car_init_pair_cols(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint32 idx;
@@ -4382,8 +4415,8 @@ uint32 car_init_pair_cols(void)
     }
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    val = (sint16)xport_load_le16(level_header + 8);
-    result = (sint16)xport_load_le16(level_header + 10);
+    val = (sint16)(memcpy(&wire_halfword_1, level_header + 8, sizeof(wire_halfword_1)), wire_halfword_1);
+    result = (sint16)(memcpy(&wire_halfword_2, level_header + 10, sizeof(wire_halfword_2)), wire_halfword_2);
     col_bounds.first_node = val;
     col_bounds.last_node = result;
     return result;

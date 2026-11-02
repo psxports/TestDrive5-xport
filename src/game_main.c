@@ -238,6 +238,12 @@ void xport_main(void)
         sint32 operation_ok = !(!xport_window_init());
         XASSERT(operation_ok);
     }
+    xport_set_cleanup(hd_free);
+    if (!xport_is_headless())
+    {
+        sint32 initialized = hd_init();
+        XASSERT(initialized);
+    }
 #if !defined(LOCKSTEP_DEBUG)
     {
         sint32 operation_ok = !(!startup_random_seed(&random_seed));

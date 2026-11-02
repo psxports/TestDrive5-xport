@@ -3,6 +3,8 @@
 
 #include "game.h"
 
+static sint32 save_ready;
+
 typedef struct SAVE_WRITE_CURSOR
 {
     uint8 *bytes;
@@ -19,12 +21,14 @@ typedef struct SAVE_READ_CURSOR
 
 static uint32 write_halves(SAVE_WRITE_CURSOR *cursor, const uint16 *src, uint32 count)
 {
+    uint16 wire_halfword_1;
+
     uint32 idx;
 
     FUNCTION_MARKER(0x800BABC8, "SLUS_006.10");
     XASSERT(!(cursor->offset > cursor->capacity || count > (cursor->capacity - cursor->offset) / 2));
     for (idx = 0; idx < count; ++idx)
-        xport_store_le16(cursor->bytes + cursor->offset + idx * 2, src[idx]);
+        (wire_halfword_1 = (uint16)(src[idx]), memcpy(cursor->bytes + cursor->offset + idx * 2, &wire_halfword_1, sizeof(wire_halfword_1)));
     cursor->offset += count * 2;
     return cursor->offset;
 }
@@ -120,12 +124,14 @@ uint32 save_encode_progress(uint8 *dst, uint32 capacity)
 
 static uint32 read_halves(SAVE_READ_CURSOR *cursor, uint16 *dst, uint32 count)
 {
+    uint16 wire_halfword_1;
+
     uint32 idx;
 
     FUNCTION_MARKER(0x800BB288, "SLUS_006.10");
     XASSERT(!(cursor->offset > cursor->capacity || count > (cursor->capacity - cursor->offset) / 2));
     for (idx = 0; idx < count; ++idx)
-        dst[idx] = xport_load_le16(cursor->bytes + cursor->offset + idx * 2);
+        dst[idx] = (memcpy(&wire_halfword_1, cursor->bytes + cursor->offset + idx * 2, sizeof(wire_halfword_1)), wire_halfword_1);
     cursor->offset += count * 2;
     return cursor->offset;
 }
@@ -150,6 +156,8 @@ static uint32 read_words(SAVE_READ_CURSOR *cursor, uint32 *dst, uint32 count)
 
 uint32 save_decode_progress(const uint8 *src, uint32 capacity)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 wire_word_3, wire_word_10, wire_word_11;
     SAVE_READ_CURSOR cursor = {src, capacity, 0};
     uint32 port, dead_zone, sensitivity, center, high, low, laps;
@@ -193,7 +201,7 @@ uint32 save_decode_progress(const uint8 *src, uint32 capacity)
     /* Reject response tuning that would make the gear divisor zero */
     for (port = 0; port < 2; ++port)
     {
-        if (xport_load_le16(src + 428 + port * 24) == 0x8000 || xport_load_le16(src + 436 + port * 24) == 0x8000)
+        if ((memcpy(&wire_halfword_1, src + 428 + port * 24, sizeof(wire_halfword_1)), wire_halfword_1) == 0x8000 || (memcpy(&wire_halfword_2, src + 436 + port * 24, sizeof(wire_halfword_2)), wire_halfword_2) == 0x8000)
             return 0;
     }
     /* Preserve bounded audio settings before publishing saved state */
@@ -281,6 +289,12 @@ sint32 save_write_game(void)
     return result;
 }
 
+void save_autosave(void)
+{
+    if (save_ready && race_session.demo == 0 && replay_mode == 0)
+        save_write_game();
+}
+
 sint32 save_load_game(void)
 {
     uint8 *image = (uint8 *)malloc(SAVE_PAYLOAD_BYTES);
@@ -292,6 +306,7 @@ sint32 save_load_game(void)
     if (result == SAVE_PAYLOAD_BYTES && save_decode_progress(image, SAVE_PAYLOAD_BYTES) != SAVE_PAYLOAD_BYTES)
         result = -1;
     free(image);
+    save_ready = result == 0 || result == SAVE_PAYLOAD_BYTES;
     XASSERT(!(result != 0 && result != SAVE_PAYLOAD_BYTES));
     return result == 0 ? 0 : result == SAVE_PAYLOAD_BYTES ? 1 : -1;
 }

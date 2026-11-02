@@ -45,6 +45,49 @@ DISPLAY_OPTIONS disp_options = {.scr_x = 2, .scr_y = 1};
 
 static uint32 set_video_mode(sint32 mode);
 
+void disp_clock_init(DISPLAY_CLOCK *clock, uint32 fields, uint32 scene)
+{
+    XASSERT(fields != 0);
+    clock->field = xport_frame();
+    clock->fields = fields;
+    clock->steps = 0;
+    clock->scene = scene;
+    clock->mode = xport_hd != 0;
+}
+
+sint32 disp_clock_step(DISPLAY_CLOCK *clock, uint32 scene)
+{
+    uint64 field, horizon = 4 * (uint64)clock->fields;
+    // service SDK callbacks without an incidental software presentation
+    gpu_frame_begin();
+    VSync(-1);
+    gpu_frame_end();
+    field = xport_frame();
+    if (field < clock->field || clock->mode != (xport_hd != 0) || clock->scene != scene)
+    {
+        clock->field = field;
+        clock->steps = 0;
+        clock->mode = xport_hd != 0;
+        clock->scene = scene;
+        hd_reseed_race();
+    }
+    // retain four recent steps and the substep remainder after a long stall
+    if (field - clock->field > horizon)
+    {
+        clock->field = field - horizon - (field - clock->field) % clock->fields;
+        hd_reseed_race();
+    }
+    if (clock->steps >= 4 || field - clock->field < clock->fields)
+    {
+        hd_present_frame(clock->field, clock->fields);
+        clock->steps = 0;
+        return 0;
+    }
+    clock->field += clock->fields;
+    ++clock->steps;
+    return 1;
+}
+
 void disp_draw_ordering_table(void)
 {
     uint32 count;

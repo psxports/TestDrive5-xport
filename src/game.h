@@ -46,5 +46,6 @@
 #include "wheels.h"
 #include "save.h"
 #include "timing.h"
+#include "hd.h"
 
 #endif

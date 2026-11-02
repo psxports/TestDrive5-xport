@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include <stdlib.h>
+#include <math.h>
 
 #include "psx_gpu.h"
 #include "game.h"
@@ -83,7 +84,86 @@ static uint32 draw_headlights(uint32 slot);
 static uint32 draw_speed_smoke(uint32 slot);
 static uint32 draw_police_lights(CAR_STATE *car);
 
-uint32 car_draw_racing_model(uint32 slot)
+static void draw_hd_lamp(const SVECTOR *lamp, float center_y, const uint32 geometry[8], const POLY_FT4 *material, const POINT_CT *gradient, sint32 billboard)
+{
+    VECTORF center = {(float)lamp->vx, center_y, (float)lamp->vz}, corners[4];
+    HD_TEXTURE texture;
+    RGBC colors[4];
+    uint32 point;
+    if (!hd_capture_active())
+        return;
+    texture = hd_quad_texture(material->p, &material->rgbc);
+    if (gradient == NULL && !billboard)
+        texture.flags |= HD_LAMP_GLOW;
+    for (point = 0; point < 4; ++point)
+    {
+        SVECTOR vertex;
+        memcpy(&vertex, geometry + point * 2, sizeof(vertex));
+        corners[point].vx = (float)vertex.vx;
+        corners[point].vy = (float)vertex.vy;
+        corners[point].vz = (float)vertex.vz;
+        colors[point] = gradient != NULL ? gradient[point].rgbc : material->rgbc;
+    }
+    if (billboard)
+        hd_attached_quad(&center, corners, &texture, colors);
+    else
+    {
+        VECTORF vertices[4];
+        MATRIXF transform = hd_model_transform();
+        float facing;
+        for (point = 0; point < 4; ++point)
+        {
+            corners[point].vx += center.vx;
+            corners[point].vy += center.vy;
+            corners[point].vz += center.vz;
+            RotTransf(&transform, corners + point, vertices + point);
+        }
+        facing = vertices[0].vx * (vertices[1].vy * vertices[2].vz - vertices[1].vz * vertices[2].vy) + vertices[0].vy * (vertices[1].vz * vertices[2].vx - vertices[1].vx * vertices[2].vz) + vertices[0].vz * (vertices[1].vx * vertices[2].vy - vertices[1].vy * vertices[2].vx);
+        if (facing >= 0.0f)
+            hd_world_quad(vertices, &texture, colors, 1);
+    }
+}
+
+static void draw_hd_rear_projection(uint32 slot, const SVECTOR *lamp, float ground_height, const uint32 geometry[8], const POLY_FT4 *material, const POINT_CT gradient[4])
+{
+    const CAR_STATE *car = &car_states[slot];
+    HD_TEXTURE texture;
+    VECTORF points[4];
+    MATRIXF rotation = {0};
+    RGBC colors[4];
+    uint32 point, row, column;
+    if (!hd_capture_active() || car->ground_n.vy == 0)
+        return;
+    texture = hd_quad_texture(material->p, &material->rgbc);
+    for (row = 0; row < 3; ++row)
+        for (column = 0; column < 3; ++column)
+            rotation.m[row][column] = car->transform.m[row][column] / 4096.0f;
+    for (point = 0; point < 4; ++point)
+    {
+        SVECTOR source;
+        VECTORF local, world;
+        memcpy(&source, geometry + point * 2, sizeof(source));
+        // tuck the bright edge under the bumper and shorten the road footprint
+        local = (VECTORF){lamp->vx + source.vx, 0.0f, lamp->vz + 40.0f + source.vy * 0.5f};
+        ApplyMatrixf(&rotation, &local, &world);
+        // place the glow on the receiving plane instead of intersecting it with a vertical billboard
+        world.vy = ground_height - (world.vx * car->ground_n.vx + world.vz * car->ground_n.vz) / car->ground_n.vy;
+        world.vx += car->pos.x / 256.0f;
+        world.vz += car->pos.z / 256.0f;
+        {
+            VEC3 sample = {.x = (sint32)(world.vx * 256.0f), .y = car->pos.y, .z = (sint32)(world.vz * 256.0f)};
+            float surface;
+            if (track_render_surface_height(&car->track_location, &sample, &surface))
+                world.vy = surface;
+        }
+        world.vy -= 4.0f;
+        points[point] = world;
+        colors[point] = gradient[point].rgbc;
+    }
+    hd_road_quad(points, &texture, colors);
+}
+
+static uint32 draw_racing_model(uint32 slot)
 {
     MODEL_RESOURCE render_model;
     uint8 *model_data;
@@ -127,7 +207,10 @@ uint32 car_draw_racing_model(uint32 slot)
     ((MODEL_HEADER *)model_data)->position.bits.z = z;
     result = model_visible_matrix(model_data);
     if (result == 0)
+    {
+        hd_draw_car_candidate(slot, &render_model, HD_CAR_RACING);
         return result;
+    }
     car_update_lighting(car);
     model_transform_matrix(&car->transform, &car->pos);
     model_draw(&render_model);
@@ -150,7 +233,15 @@ uint32 car_draw_racing_model(uint32 slot)
     return result;
 }
 
-uint32 car_draw_scene(void)
+uint32 car_draw_racing_model(uint32 slot)
+{
+    sint32 previous = hd_car_begin(slot);
+    uint32 result = draw_racing_model(slot);
+    hd_car_end(previous);
+    return result;
+}
+
+static uint32 draw_scene(void)
 {
     MODEL_RESOURCE render_model;
     uint8 *model_data;
@@ -194,6 +285,8 @@ uint32 car_draw_scene(void)
             model_draw(&render_model);
             if (race_session.cop_chase != 0 && chase_state.signal_level != 0)
                 draw_police_lights(car);
+            else
+                hd_police_retire();
             draw_rear_lights(sel);
             draw_headlights(sel);
             draw_speed_smoke(sel);
@@ -204,6 +297,8 @@ uint32 car_draw_scene(void)
             else
                 draw_contact_shadow(sel);
         }
+        else
+            hd_draw_car_candidate(sel, &render_model, HD_CAR_PRIMARY);
     }
     car_update_skid_effects(car);
     if (race_session.time_trial == 0)
@@ -241,7 +336,15 @@ uint32 car_draw_scene(void)
     return 0;
 }
 
-static uint32 draw_traffic_model(uint32 slot)
+uint32 car_draw_scene(void)
+{
+    sint32 previous = hd_car_begin(race_view.primary_car);
+    uint32 result = draw_scene();
+    hd_car_end(previous);
+    return result;
+}
+
+static uint32 draw_traffic_body(uint32 slot)
 {
     MODEL_RESOURCE render_model;
     uint8 *model_data;
@@ -285,7 +388,10 @@ static uint32 draw_traffic_model(uint32 slot)
     ((MODEL_HEADER *)model_data)->position.bits.z = z;
     result = model_visible_matrix(model_data);
     if (result == 0)
+    {
+        hd_draw_car_candidate(slot, &render_model, HD_CAR_TRAFFIC);
         return result;
+    }
     car_update_lighting(car);
     model_apply_light_matrix(&car->transform);
     model_transform_matrix(&car->transform, &car->pos);
@@ -297,6 +403,8 @@ static uint32 draw_traffic_model(uint32 slot)
         chase_state.signal_level = 4096;
         draw_police_lights(car);
     }
+    else if (slot == 9)
+        hd_police_retire();
     if (car->motion_mode != 0)
         draw_ground_shadow(car);
     else
@@ -307,7 +415,15 @@ static uint32 draw_traffic_model(uint32 slot)
     return result;
 }
 
-uint32 car_draw_split_model(uint32 slot, uint32 alternate)
+static uint32 draw_traffic_model(uint32 slot)
+{
+    sint32 previous = hd_car_begin(slot);
+    uint32 result = draw_traffic_body(slot);
+    hd_car_end(previous);
+    return result;
+}
+
+static uint32 draw_split_model(uint32 slot, uint32 alternate)
 {
     MODEL_RESOURCE render_model;
     uint8 *model_data;
@@ -342,6 +458,8 @@ uint32 car_draw_split_model(uint32 slot, uint32 alternate)
                     chase_draw_health(slot);
                 if (race_session.multiplayer_mode == mode && chase_state.signal_level != 0 && slot == chase_state.pursuer_slot)
                     draw_police_lights(car);
+                else
+                    hd_police_retire();
             }
             draw_rear_lights(slot);
             draw_headlights(slot);
@@ -352,8 +470,18 @@ uint32 car_draw_split_model(uint32 slot, uint32 alternate)
             else
                 draw_ground_shadow(car);
         }
+        else
+            hd_draw_car_candidate(slot, &render_model, HD_CAR_SPLIT);
     }
     return car_update_skid_effects(car);
+}
+
+uint32 car_draw_split_model(uint32 slot, uint32 alternate)
+{
+    sint32 previous = hd_car_begin(slot);
+    uint32 result = draw_split_model(slot, alternate);
+    hd_car_end(previous);
+    return result;
 }
 
 static uint32 init_environment(void)
@@ -386,6 +514,8 @@ static uint32 init_environment(void)
 
 uint32 car_init_scene_rendering(void)
 {
+    uint16 wire_halfword_1;
+
     uint8 *level_header;
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     sint32 count;
@@ -463,7 +593,7 @@ uint32 car_init_scene_rendering(void)
                 const SVECTOR *vertices = NULL;
                 XASSERT(!(src->capacity < 48));
                 vertex_offset = ((const MODEL_HEADER *)src->bytes)->vertex_offset;
-                vertex_count = (sint16)xport_load_le16(src->bytes + 14);
+                vertex_count = (sint16)(memcpy(&wire_halfword_1, src->bytes + 14, sizeof(wire_halfword_1)), wire_halfword_1);
                 if (vertex_count > 0)
                 {
                     uint32 vertex_bytes = (uint32)(vertex_count - 1) * sizeof(SVECTOR) + 3 * sizeof(sint16);
@@ -586,6 +716,8 @@ uint32 car_fit_model_bounds(const SVECTOR *vertices, sint32 count, uint32 slot)
 
 uint32 car_upload_environment_tex(const uint8 *image, uint32 capacity, const uint8 tex[16])
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     uint32 wire_word_7, wire_word_8;
     uint32 page;
     uint32 u;
@@ -600,14 +732,14 @@ uint32 car_upload_environment_tex(const uint8 *image, uint32 capacity, const uin
     PSX_RECT rect;
 
     FUNCTION_MARKER(0x8007A984, "SLUS_006.10");
-    page = xport_load_le16(tex + 8);
+    page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     u = tex[14];
     x = ((page & 15) << 6) + (u >> ((page & 0x180) != 0 ? 1 : 2));
-    page = xport_load_le16(tex + 8);
+    page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     XASSERT(!(capacity < 4));
     memcpy(&signature, image, sizeof(signature));
     v = tex[15];
-    clut = xport_load_le16(tex + 10);
+    clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     y = ((page & 16) << 4) + v;
     if (signature != 16)
         return 16;
@@ -616,8 +748,8 @@ uint32 car_upload_environment_tex(const uint8 *image, uint32 capacity, const uin
     block = image + block_offset;
     rect.x = (sint16)((clut & 63) << 4);
     rect.y = (sint16)(clut >> 6);
-    rect.w = (sint16)xport_load_le16(block + 8);
-    rect.h = (sint16)xport_load_le16(block + 10);
+    rect.w = (sint16)(memcpy(&wire_halfword_1, block + 8, sizeof(wire_halfword_1)), wire_halfword_1);
+    rect.h = (sint16)(memcpy(&wire_halfword_2, block + 10, sizeof(wire_halfword_2)), wire_halfword_2);
     bytes = rect.w > 0 && rect.h > 0 ? (uint32)rect.w * (uint32)rect.h * 2 : 0;
     XASSERT(!(bytes > capacity - block_offset - 12));
     LoadImagePSX(&rect, (uint32 *)(block + 12));
@@ -629,8 +761,8 @@ uint32 car_upload_environment_tex(const uint8 *image, uint32 capacity, const uin
     XASSERT(!(capacity - block_offset < 12));
     rect.x = (sint16)x;
     rect.y = (sint16)y;
-    rect.w = (sint16)xport_load_le16(block + 8);
-    rect.h = (sint16)xport_load_le16(block + 10);
+    rect.w = (sint16)(memcpy(&wire_halfword_3, block + 8, sizeof(wire_halfword_3)), wire_halfword_3);
+    rect.h = (sint16)(memcpy(&wire_halfword_4, block + 10, sizeof(wire_halfword_4)), wire_halfword_4);
     bytes = rect.w > 0 && rect.h > 0 ? (uint32)rect.w * (uint32)rect.h * 2 : 0;
     XASSERT(!(bytes > capacity - block_offset - 12));
     return (uint32)LoadImagePSX(&rect, (uint32 *)(block + 12));
@@ -660,10 +792,10 @@ uint32 car_init_environment_packets(void)
         {
             poly3 = car_environment_render.buffers[buffer].triangles + idx;
             setPolyFT3(poly3);
-            page = xport_load_le16(tex + 8);
+            page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = poly3->rgbc.code;
             poly3->p[1].attr = (uint16)(page);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             poly3->rgbc.code = (uint8)((code | 2) & 0xFE);
             poly3->rgbc.r = (uint8)(128);
             poly3->rgbc.g = (uint8)(128);
@@ -677,10 +809,10 @@ uint32 car_init_environment_packets(void)
         {
             poly4 = car_environment_render.buffers[buffer].quads + idx;
             setPolyFT4(poly4);
-            page = xport_load_le16(tex + 8);
+            page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = poly4->rgbc.code;
             poly4->p[1].attr = (uint16)(page);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             poly4->rgbc.code = (uint8)((code | 2) & 0xFE);
             poly4->rgbc.r = (uint8)(128);
             poly4->rgbc.g = (uint8)(128);
@@ -693,6 +825,8 @@ uint32 car_init_environment_packets(void)
 
 uint32 car_draw_environment_mapping(const MODEL_RESOURCE *model, const CAR_ENVIRONMENT_MAPPING *mapping, uint32 distance)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+
     DISPLAY_ORDERING bucket, ordering;
     static const uint32 n_commands[4] = {0x486012, 0x48E012, 0x496012, 0x486012};
     uint32 val, product, scale_x, scale_y, n_scale;
@@ -746,7 +880,7 @@ uint32 car_draw_environment_mapping(const MODEL_RESOURCE *model, const CAR_ENVIR
     vertex_offset = ((const MODEL_HEADER *)model->bytes)->vertex_offset;
     shift = (shift - other_shift) & 31;
     cur_frame = disp_state.cur;
-    quotient_x = (sint16)xport_load_le16(model->bytes + 12);
+    quotient_x = (sint16)(memcpy(&wire_halfword_1, model->bytes + 12, sizeof(wire_halfword_1)), wire_halfword_1);
     far_plane >>= (other_shift + 2) & 31;
     ordering.tags = cur_frame->ordering;
     ordering.byte_offset = 0;
@@ -759,7 +893,7 @@ uint32 car_draw_environment_mapping(const MODEL_RESOURCE *model, const CAR_ENVIR
     do
     {
         kind = stream[2];
-        count = (sint16)xport_load_le16(stream);
+        count = (sint16)(memcpy(&wire_halfword_2, stream, sizeof(wire_halfword_2)), wire_halfword_2);
         stream += 4;
         if (kind <= 1)
             stream += (uint32)count * 20;
@@ -786,7 +920,7 @@ uint32 car_draw_environment_mapping(const MODEL_RESOURCE *model, const CAR_ENVIR
             {
                 for (vertex = 0; vertex < 3; ++vertex)
                 {
-                    val = (sint16)xport_load_le16(stream + vertex * 2);
+                    val = (sint16)(memcpy(&wire_halfword_3, stream + vertex * 2, sizeof(wire_halfword_3)), wire_halfword_3);
                     model_offset = vertex_offset + (val << 3);
                     XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                     vertex_addresses[vertex] = model->bytes + model_offset;
@@ -807,7 +941,7 @@ uint32 car_draw_environment_mapping(const MODEL_RESOURCE *model, const CAR_ENVIR
                     packet_points[0].xy.xy = (uint32)(xport_gte_read_data(12));
                     packet_points[1].xy.xy = (uint32)(xport_gte_read_data(13));
                     packet_points[2].xy.xy = (uint32)(xport_gte_read_data(14));
-                    val = (sint16)xport_load_le16(stream + 6);
+                    val = (sint16)(memcpy(&wire_halfword_4, stream + 6, sizeof(wire_halfword_4)), wire_halfword_4);
                     model_offset = vertex_offset + (val << 3);
                     XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                     address = model->bytes + model_offset;
@@ -945,6 +1079,8 @@ static void environment_link_packet(uint32 *packet_tag, const CAR_ENVIRONMENT_WO
 
 static void environment_map_uv(const uint8 *prim, const MODEL_RESOURCE *model, uint32 vertex_offset, POINT_T *packet_points, RGBC *packet_color, CAR_ENVIRONMENT_WORK *work, uint32 count, uint32 c, uint32 s, uint32 shift, uint32 origin_u, uint32 origin_v, uint32 tex_u, uint32 tex_v)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     uint32 u[4], v[4];
     uint32 idx, x, z, product, cross, minimum_u, minimum_v;
     const uint8 *vertex;
@@ -953,11 +1089,11 @@ static void environment_map_uv(const uint8 *prim, const MODEL_RESOURCE *model, u
 
     for (idx = 0; idx < count; ++idx)
     {
-        model_offset = (vertex_offset + (uint32)(sint32)(sint16)xport_load_le16(prim + idx * 2) * 8);
+        model_offset = (vertex_offset + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_1, prim + idx * 2, sizeof(wire_halfword_1)), wire_halfword_1) * 8);
         XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 6));
         vertex = model->bytes + model_offset;
-        x = (sint16)xport_load_le16(vertex);
-        z = (sint16)xport_load_le16(vertex + 4);
+        x = (sint16)(memcpy(&wire_halfword_2, vertex, sizeof(wire_halfword_2)), wire_halfword_2);
+        z = (sint16)(memcpy(&wire_halfword_3, vertex + 4, sizeof(wire_halfword_3)), wire_halfword_3);
         cross = z * s;
         product = x * c - cross;
         if (idx == 3)
@@ -1006,6 +1142,10 @@ static void environment_map_uv(const uint8 *prim, const MODEL_RESOURCE *model, u
 
 static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10;
+
     uint32 wire_word_17, wire_word_18, wire_word_19, wire_word_20, wire_word_21, wire_word_22, wire_word_23, wire_word_24;
     VEC3 model_pos;
     DISPLAY_ORDERING ordering;
@@ -1128,6 +1268,7 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
         model_pos.bits.z = ((const MODEL_HEADER *)model->bytes)->position.bits.z;
         model_transform_matrix(&car->transform, &model_pos);
         val = fixed_sqrt(relative_x * relative_x + relative_y * relative_y + relative_z * relative_z);
+        hd_environment_reflection(model, &car_environment_render.mapping, 1);
         return car_draw_environment_mapping(model, &car_environment_render.mapping, val * 4);
     }
     if (mode == 1)
@@ -1160,6 +1301,7 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
         work.u_mask = (uint32)(0xFFFFFFC0);
         work.v_mask = (uint32)(0xFFFFFFC0);
     }
+    hd_environment_surface(model, mode == 2 ? -car->orientation.y / 256.0f * RAD12 : 0.0f, mode == 2 ? ((const MODEL_HEADER *)model->bytes)->position.x / 8192.0f : (float)(sint32)origin_u, mode == 1 ? (sint32)car_environment_render.reflection_phase / 256.0f : mode == 2 ? ((const MODEL_HEADER *)model->bytes)->position.z / 8192.0f : (float)(sint32)origin_v, mode == 1 ? 128 : mode == 2 ? 64 : 0, mode == 1 || mode == 2 ? 64 : 0);
     c = (uint32)rcos((sint32)angle);
     s = (uint32)rsin((sint32)angle);
     val = ((const MODEL_HEADER *)model->bytes)->stream_offset;
@@ -1174,7 +1316,7 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
     work.quad_color = (uint32)(val | 0x2E000000);
     val = ((const MODEL_HEADER *)model->bytes)->vertex_offset;
     far_shift = model_render.coord_shift;
-    amount = (sint16)xport_load_le16(model->bytes + 12);
+    amount = (sint16)(memcpy(&wire_halfword_1, model->bytes + 12, sizeof(wire_halfword_1)), wire_halfword_1);
     cur_frame = disp_state.cur;
     vertex_offset = val;
     other -= far_shift;
@@ -1191,7 +1333,7 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
     do
     {
         kind = stream[2];
-        amount = (sint16)xport_load_le16(stream);
+        amount = (sint16)(memcpy(&wire_halfword_2, stream, sizeof(wire_halfword_2)), wire_halfword_2);
         stream += 4;
         if (kind == 0 || kind == 1)
             stream += (uint32)amount * 20;
@@ -1217,15 +1359,15 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
             count = kind == 2 ? 3 : 4;
             for (idx = 0; (sint32)idx < amount; ++idx)
             {
-                if ((sint16)xport_load_le16(prim + (kind == 2 ? 22 : 26)) >= 151 && (sint16)xport_load_le16(prim + (kind == 2 ? 30 : 34)) >= 151 && (sint16)xport_load_le16(prim + (kind == 2 ? 38 : 42)) >= 151 && (kind == 2 || (sint16)xport_load_le16(prim + 50) >= 151))
+                if ((sint16)(memcpy(&wire_halfword_3, prim + (kind == 2 ? 22 : 26), sizeof(wire_halfword_3)), wire_halfword_3) >= 151 && (sint16)(memcpy(&wire_halfword_4, prim + (kind == 2 ? 30 : 34), sizeof(wire_halfword_4)), wire_halfword_4) >= 151 && (sint16)(memcpy(&wire_halfword_5, prim + (kind == 2 ? 38 : 42), sizeof(wire_halfword_5)), wire_halfword_5) >= 151 && (kind == 2 || (sint16)(memcpy(&wire_halfword_6, prim + 50, sizeof(wire_halfword_6)), wire_halfword_6) >= 151))
                 {
-                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)xport_load_le16(prim) * 8);
+                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_7, prim, sizeof(wire_halfword_7)), wire_halfword_7) * 8);
                     XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                     vertex[0] = model->bytes + model_offset;
-                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)xport_load_le16(prim + 2) * 8);
+                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_8, prim + 2, sizeof(wire_halfword_8)), wire_halfword_8) * 8);
                     XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                     vertex[1] = model->bytes + model_offset;
-                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)xport_load_le16(prim + 4) * 8);
+                    model_offset = (vertex_offset + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_9, prim + 4, sizeof(wire_halfword_9)), wire_halfword_9) * 8);
                     XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                     vertex[2] = model->bytes + model_offset;
                     xport_gte_write_data(0, (memcpy(&wire_word_17, vertex[0], sizeof(wire_word_17)), wire_word_17));
@@ -1242,7 +1384,7 @@ static uint32 draw_environment_model(const MODEL_RESOURCE *model, CAR_STATE *car
                         packet_points[0].xy.xy = (uint32)(xport_gte_read_data(12));
                         packet_points[1].xy.xy = (uint32)(xport_gte_read_data(13));
                         packet_points[2].xy.xy = (uint32)(xport_gte_read_data(14));
-                        model_offset = (vertex_offset + (uint32)(sint32)(sint16)xport_load_le16(prim + 6) * 8);
+                        model_offset = (vertex_offset + (uint32)(sint32)(sint16)(memcpy(&wire_halfword_10, prim + 6, sizeof(wire_halfword_10)), wire_halfword_10) * 8);
                         XASSERT(!(model_offset > model->capacity || model->capacity - model_offset < 8));
                         point = model->bytes + model_offset;
                         xport_gte_write_data(0, (memcpy(&wire_word_23, point, sizeof(wire_word_23)), wire_word_23));
@@ -1326,9 +1468,9 @@ static uint32 init_shadow_packets(void)
             {
                 poly = shadow_render.buffers[buffer] + slot * 2 + half;
                 setPolyFT4(poly);
-                page = xport_load_le16(tex + 8);
+                page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
                 poly->p[1].attr = (uint16)(page | 0x40);
-                clut = xport_load_le16(tex + 10);
+                clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
                 code = poly->rgbc.code;
                 poly->p[0].uv.u = (uint8)(u);
                 poly->p[1].uv.u = (uint8)(u);
@@ -1350,6 +1492,203 @@ static uint32 init_shadow_packets(void)
     return 0;
 }
 
+void car_draw_hd_shadow(uint32 slot, uint32 kind)
+{
+    const CAR_STATE *car;
+    VECTORF points[6] = {{0}};
+    uint32 point, axis, part;
+    if (!hd_capture_active())
+        return;
+    XASSERT(slot < 14 && kind < 3);
+    car = &car_states[slot];
+    if (kind == 0)
+    {
+        for (point = 0; point < 4; ++point)
+            for (axis = 0; axis < 3; ++axis)
+                (&points[point < 2 ? point : point + 2].vx)[axis] = car->body_contact_pos[point].v[axis] / 256.0f;
+    }
+    else if (kind == 1)
+    {
+        MATRIXF rotation = {0};
+        uint32 row, column;
+        for (row = 0; row < 3; ++row)
+            for (column = 0; column < 3; ++column)
+                rotation.m[row][column] = car->transform.m[row][column] / 4096.0f;
+        for (point = 0; point < 6; ++point)
+        {
+            VECTORF local = {(point & 1) != 0 ? (float)car_body_points[slot][1].vx : -(float)car_body_points[slot][1].vx, (float)car_body_points[slot][1].vy, point < 2 ? (float)car_body_points[slot][1].vz : point < 4 ? 0.0f : -(float)car_body_points[slot][1].vz};
+            ApplyMatrixf(&rotation, &local, &points[point]);
+            points[point].vx += car->pos.x / 256.0f;
+            points[point].vy += car->pos.y / 256.0f;
+            points[point].vz += car->pos.z / 256.0f;
+        }
+    }
+    else
+    {
+        float angle = car->angles.vy * RAD12, c = cosf(angle), s = sinf(angle), maximum_x = 0.0f, maximum_z = 0.0f;
+        if (car->ground_n.vy == 0)
+            return;
+        for (point = 0; point < 8; ++point)
+        {
+            float x = (car->body_contact_pos[point].x / 256.0f - car->pos.x / 256.0f);
+            float z = (car->body_contact_pos[point].z / 256.0f - car->pos.z / 256.0f);
+            maximum_x = fmaxf(maximum_x, fabsf(x * c - z * s));
+            maximum_z = fmaxf(maximum_z, fabsf(x * s + z * c));
+        }
+        for (point = 0; point < 4; ++point)
+        {
+            uint32 target = point < 2 ? point : point + 2;
+            float x = (point & 1) != 0 ? -maximum_x : maximum_x;
+            float z = point < 2 ? maximum_z : -maximum_z;
+            points[target].vx = x * c + z * s;
+            points[target].vz = -x * s + z * c;
+            points[target].vy = -(points[target].vx * car->ground_n.vx + points[target].vz * car->ground_n.vz) / car->ground_n.vy;
+            points[target].vx += car->pos.x / 256.0f;
+            points[target].vy += (sint32)car->ground_height / 256.0f;
+            points[target].vz += car->pos.z / 256.0f;
+        }
+    }
+    for (axis = 0; axis < 3; ++axis)
+    {
+        (&points[2].vx)[axis] = ((&points[0].vx)[axis] + (&points[4].vx)[axis]) * 0.5f;
+        (&points[3].vx)[axis] = ((&points[1].vx)[axis] + (&points[5].vx)[axis]) * 0.5f;
+    }
+    {
+        float nx = (float)car->ground_n.vx, ny = (float)car->ground_n.vy, nz = (float)car->ground_n.vz;
+        float length = sqrtf(nx * nx + ny * ny + nz * nz);
+        float offset = length > 0.0f ? (ny >= 0.0f ? -4.0f : 4.0f) / length : 0.0f;
+        for (point = 0; point < 6; ++point)
+        {
+            points[point].vx += nx * offset;
+            points[point].vy += length > 0.0f ? ny * offset : -4.0f;
+            points[point].vz += nz * offset;
+            {
+                VEC3 sample = {.x = (sint32)(points[point].vx * 256.0f), .y = car->pos.y, .z = (sint32)(points[point].vz * 256.0f)};
+                float surface;
+                if (track_render_surface_height(&car->track_location, &sample, &surface))
+                    points[point].vy = fminf(points[point].vy, surface - 4.0f);
+            }
+        }
+    }
+    for (part = 0; part < 2; ++part)
+    {
+        const POLY_FT4 *material = &shadow_render.buffers[disp_state.bank][slot * 2 + part];
+        HD_TEXTURE texture = hd_quad_texture(material->p, &material->rgbc);
+        texture.flags |= HD_SHADOW | HD_FILTERED;
+        texture.width = (uint16)((uint8)(material->p[2].uv.u - material->p[0].uv.u) + 1);
+        texture.height = (uint16)((uint8)(material->p[1].uv.v - material->p[0].uv.v) + 1);
+        hd_shadow_quad(slot, part, kind, points + part * 2, &texture, &material->rgbc, material->p);
+    }
+}
+
+void car_draw_hd_candidate_lamps(uint32 slot, float police_signal)
+{
+    const CAR_STATE *car;
+    const uint8 *header;
+    uint32 active = 0, flags, type, stage, index, point;
+    sint32 intensity = -64, color = 32, fade, height_checked = 0, height_valid = 0;
+    float height = 0.0f;
+    if (!hd_capture_active())
+        return;
+    XASSERT(slot < 14);
+    car = &car_states[slot];
+    header = scene_level_image.bytes + scene_level_image.desc.header_offset;
+    flags = header[30];
+    if (slot == 0 && (input_ports[0].controls & 0x1000) == 0)
+        active = car->braking != 0;
+    if (slot == 1 && race_session.two_players != 0 && (input_ports[1].controls & 0x1000) == 0 && car->braking != 0)
+        active = 1;
+    if ((flags & 1) != 0)
+    {
+        color = 96;
+        intensity = 80;
+    }
+    else if ((flags & 2) != 0)
+    {
+        color = 48;
+        intensity = 32;
+    }
+    if (active)
+    {
+        color += 48;
+        intensity += 48;
+    }
+    fade = intensity - rear_light_fade[slot];
+    if (fade < 0)
+        fade = 0;
+    if (fade > 128)
+        fade = 128;
+    for (type = 0; type < 2; ++type)
+    {
+        if ((type == 0 && !active && (flags & 3) == 0) || (type == 1 && (flags & 1) == 0))
+            continue;
+        for (stage = 0; stage < 2; ++stage)
+        {
+            if (type == 0 && stage == 1 && fade == 0)
+                continue;
+            if (stage == 1 && !height_checked)
+            {
+                height_valid = track_render_surface_height(&car->track_location, &car->pos, &height);
+                height_checked = 1;
+            }
+            if (stage == 1 && !height_valid)
+                continue;
+            for (index = 0; index < 2; ++index)
+            {
+                uint32 offset = slot * 4 + index * 2 + disp_state.bank;
+                const POLY_FT4 *source = &light_packets[type].billboards[offset];
+                const SVECTOR *lamp = &car_lamp_points[slot][index + type * 2];
+                POLY_FT4 material = {0};
+                POINT_CT gradient[4] = {{0}};
+                material.rgbc = source->rgbc;
+                if (type == 0)
+                    material.rgbc.r = material.rgbc.g = material.rgbc.b = (uint8)color;
+                for (point = 0; point < 4; ++point)
+                {
+                    material.p[point].uv = source->p[point].uv;
+                    material.p[point].attr = source->p[point].attr;
+                    gradient[point].rgbc = light_packets[type].projections[offset].p[point].rgbc;
+                    if (type == 0)
+                        gradient[point].rgbc.r = gradient[point].rgbc.g = gradient[point].rgbc.b = point < 2 ? 0 : (uint8)fade;
+                }
+                if (type == 0 && stage == 1)
+                    draw_hd_rear_projection(slot, lamp, height, rear_light_geometry[stage], &material, gradient);
+                else
+                    draw_hd_lamp(lamp, stage == 0 ? (float)lamp->vy : height - car->pos.y / 256.0f + car->suspension_local[(index ^ 1) + 2].vy - lamp->vy + 120.0f, type == 0 ? rear_light_geometry[stage] : headlight_geometry[stage], &material, stage == 0 ? NULL : gradient, type == 0);
+            }
+        }
+    }
+    if (police_signal != 0.0f)
+    {
+        XASSERT(police_light_config.data.count <= 4);
+        for (index = 0; index < police_light_config.data.count; ++index)
+        {
+            const CAR_POLICE_LIGHT_PACKETS *packets = &police_light_packets[index];
+            const POLY_FT4 *billboard = &packets->billboards[disp_state.bank];
+            HD_TEXTURE texture = hd_quad_texture(billboard->p, &billboard->rgbc);
+            RGBC colors[3] = {billboard->rgbc, packets->rays[1][disp_state.bank].p[0].rgbc, packets->rays[0][disp_state.bank].p[0].rgbc};
+            uint32 ray_flags[2] = {(colors[1].code & 2) != 0 ? HD_SEMITRANSPARENT : 0, (colors[2].code & 2) != 0 ? HD_SEMITRANSPARENT : 0};
+            uint32 phase = (uint8)police_light_phases[index], tint = police_light_config.data.colors[index];
+            uint32 product = (uint32)rsin(-(sint32)phase * 4) * 255u, brightness, rgb[3], part, channel;
+            if ((sint32)product < 0)
+                product += 4095;
+            brightness = product >> 12;
+            if (tint < 4)
+            {
+                rgb[0] = tint == 0 || tint == 3 ? brightness : 0;
+                rgb[1] = tint == 2 ? brightness : tint == 3 ? (brightness & 255) >> 1 : 0;
+                rgb[2] = tint == 1 ? brightness : 0;
+                for (part = 0; part < 3; ++part)
+                    for (channel = 0; channel < 3; ++channel)
+                        ((uint8 *)&colors[part])[channel] = (uint8)rgb[channel];
+            }
+            hd_police_light(index, &police_light_config.data.positions[index], &texture, colors, ray_flags, police_signal);
+        }
+    }
+    else
+        hd_police_retire();
+}
+
 static void draw_contact_shadow(uint32 slot)
 {
     DISPLAY_ORDERING ordering;
@@ -1365,6 +1704,7 @@ static void draw_contact_shadow(uint32 slot)
     DISPLAY_FRAME *cur_frame;
 
     FUNCTION_MARKER(0x800321D0, "SLUS_006.10");
+    car_draw_hd_shadow(slot, 0);
     cur_buffer = disp_state.bank;
     world[0].x = car->body_contact_pos[0].x >> 8;
     poly = shadow_render.buffers[cur_buffer] + slot * 2;
@@ -1467,6 +1807,7 @@ static void draw_body_shadow(uint32 slot)
     DISPLAY_FRAME *cur_frame;
 
     FUNCTION_MARKER(0x800326D0, "SLUS_006.10");
+    car_draw_hd_shadow(slot, 1);
     buffer = disp_state.bank;
 
     poly = shadow_render.buffers[buffer];
@@ -1544,6 +1885,7 @@ static void draw_ground_shadow(CAR_STATE *car)
     DISPLAY_FRAME *cur_frame;
 
     FUNCTION_MARKER(0x80032984, "SLUS_006.10");
+    car_draw_hd_shadow(car->slot, 2);
     heading = car->angles.vy;
     c = (uint32)rcos(heading);
     s = (uint32)rsin(heading);
@@ -1718,10 +2060,10 @@ void car_init_rear_light_packets(void)
             val = tex[15];
             other = tex[13];
             flat_packet->p[3].uv.v = (uint8)(other + val - 1);
-            val = xport_load_le16(tex + 8);
+            val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = flat_packet->rgbc.code;
             flat_packet->p[1].attr = (uint16)(val);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             flat_packet->rgbc.code = (uint8)((code & 0xFE) | 2);
             count = (sint32)(race_control.car_count << 2);
             ++idx;
@@ -1755,10 +2097,10 @@ void car_init_rear_light_packets(void)
             val = tex[15];
             other = tex[13];
             gouraud_packet->p[3].uv.v = (uint8)(other + val - 1);
-            val = xport_load_le16(tex + 8);
+            val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = gouraud_packet->p[0].rgbc.code;
             gouraud_packet->p[1].attr = (uint16)(val);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             gouraud_packet->p[0].rgbc.code = (uint8)((code & 0xFE) | 2);
             count = (sint32)(race_control.car_count << 2);
             ++idx;
@@ -1884,6 +2226,10 @@ static uint32 draw_rear_lights(uint32 slot)
             }
             PushMatrix();
             lamp = &car_lamp_points[slot][idx];
+            if (stage == 1)
+                draw_hd_rear_projection(slot, lamp, (sint32)height / 256.0f, geometry, light_packets[0].billboards + offset, gouraud_packet->p);
+            else
+                draw_hd_lamp(lamp, (float)lamp->vy, geometry, light_packets[0].billboards + offset, NULL, 1);
             if (stage == 0)
             {
                 val = ((uint32)(uint16)lamp->vx | ((uint32)(uint16)lamp->vy << 16));
@@ -2023,10 +2369,10 @@ void car_init_headlight_packets(void)
             val = tex[15];
             other = tex[13];
             flat_packet->p[3].uv.v = (uint8)(other + val - 1);
-            val = xport_load_le16(tex + 8);
+            val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = flat_packet->rgbc.code;
             flat_packet->p[1].attr = (uint16)(val);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             flat_packet->rgbc.code = (uint8)((code & 0xFE) | 2);
             count = (sint32)(race_control.car_count << 2);
             ++idx;
@@ -2072,10 +2418,10 @@ void car_init_headlight_packets(void)
             val = tex[15];
             other = tex[13];
             gouraud_packet->p[3].uv.v = (uint8)(other + val - 1);
-            val = xport_load_le16(tex + 8);
+            val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
             code = gouraud_packet->p[0].rgbc.code;
             gouraud_packet->p[1].attr = (uint16)(val);
-            clut = xport_load_le16(tex + 10);
+            clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
             gouraud_packet->p[0].rgbc.code = (uint8)((code & 0xFE) | 2);
             count = (sint32)(race_control.car_count << 2);
             ++idx;
@@ -2140,6 +2486,7 @@ static uint32 draw_headlights(uint32 slot)
             }
             PushMatrix();
             lamp = &car_lamp_points[slot][idx + 2];
+            draw_hd_lamp(lamp, stage == 0 ? (float)lamp->vy : ((sint32)height / 256.0f - car->pos.y / 256.0f) + car->suspension_local[(idx ^ 1) + 2].vy - lamp->vy + 120.0f, geometry, light_packets[1].billboards + offset, stage == 0 ? NULL : gouraud_packet->p, 0);
             if (stage == 0)
             {
                 val = ((uint32)(uint16)lamp->vx | ((uint32)(uint16)lamp->vy << 16));
@@ -2286,10 +2633,10 @@ void car_init_speed_smoke_packets(void)
         val = tex[15];
         other = tex[13];
         flat_packet->p[3].uv.v = (uint8)(other + val - 1);
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         code = flat_packet->rgbc.code;
         flat_packet->p[1].attr = (uint16)(val);
-        clut = xport_load_le16(tex + 10);
+        clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         flat_packet->rgbc.code = (uint8)((code & 0xFE) | 2);
         count = (sint32)(race_control.car_count << 2);
         ++idx;
@@ -2344,6 +2691,28 @@ static uint32 draw_speed_smoke(uint32 slot)
         flat_packet->rgbc.b = (uint8)(color);
         PushMatrix();
         body_point = &car_body_points[slot][idx + 2];
+        if (hd_capture_active())
+        {
+            VECTORF center = {body_point->vx + (idx == 0 ? 72.0f : -72.0f), body_point->vy + 256.0f, body_point->vz - 64.0f};
+            VECTORF corners[4];
+            const EFFECT_TEXTURE *source = &effect_tex[animation];
+            HD_TEXTURE texture = {source->tpage, source->clut, source->u, source->v, source->du, source->dv, HD_TEXTURED | HD_FILTERED};
+            RGBC colors[4] = {flat_packet->rgbc, flat_packet->rgbc, flat_packet->rgbc, flat_packet->rgbc};
+            uint32 corner;
+            if ((flat_packet->rgbc.code & 1) != 0)
+                texture.flags |= HD_RAW_TEXTURE;
+            if ((flat_packet->rgbc.code & 2) != 0)
+                texture.flags |= HD_SEMITRANSPARENT;
+            for (corner = 0; corner < 4; ++corner)
+            {
+                SVECTOR source_vertex;
+                memcpy(&source_vertex, speed_smoke_geometry + corner * 2, sizeof(source_vertex));
+                corners[corner].vx = (float)source_vertex.vx;
+                corners[corner].vy = (float)source_vertex.vy;
+                corners[corner].vz = (float)source_vertex.vz;
+            }
+            hd_attached_quad(&center, corners, &texture, colors);
+        }
         for (word = 0; word < 2; ++word)
         {
             high = word == 0 ? ((uint32)(uint16)(*body_point).vx | ((uint32)(uint16)(*body_point).vy << 16)) : ((uint32)(uint16)(*body_point).vz | ((uint32)(uint16)(*body_point).pad << 16));
@@ -2483,8 +2852,8 @@ uint32 car_init_police_light_packets(void)
             val = tex[15];
             other = tex[13];
             billboard->p[3].uv.v = (uint8)(other + val - 1);
-            billboard->p[1].attr = (uint16)(xport_load_le16(tex + 8));
-            billboard->p[0].attr = (uint16)(xport_load_le16(tex + 10));
+            billboard->p[1].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+            billboard->p[0].attr = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
             val = billboard->rgbc.code;
             billboard->rgbc.code = (uint8)((val & 0xFE) | 2);
             ray = &police_light_packets[grp].rays[0][idx];
@@ -2524,6 +2893,24 @@ uint32 car_update_police_light_phases(void)
         phase_cursor += 1;
     } while ((sint32)idx < (sint32)count);
     return 0;
+}
+
+static void draw_hd_police_light(uint32 index)
+{
+    const CAR_POLICE_LIGHT_PACKETS *packets = &police_light_packets[index];
+    const POLY_FT4 *billboard = &packets->billboards[disp_state.bank];
+    HD_TEXTURE texture;
+    RGBC colors[3];
+    uint32 ray_flags[2];
+    if (!hd_capture_active())
+        return;
+    texture = hd_quad_texture(billboard->p, &billboard->rgbc);
+    colors[0] = billboard->rgbc;
+    colors[1] = packets->rays[1][disp_state.bank].p[0].rgbc;
+    colors[2] = packets->rays[0][disp_state.bank].p[0].rgbc;
+    ray_flags[0] = (colors[1].code & 2) != 0 ? HD_SEMITRANSPARENT : 0;
+    ray_flags[1] = (colors[2].code & 2) != 0 ? HD_SEMITRANSPARENT : 0;
+    hd_police_light(index, &police_light_config.data.positions[index], &texture, colors, ray_flags, (float)(sint16)chase_state.signal_level);
 }
 
 static uint32 draw_police_lights(CAR_STATE *car)
@@ -2591,6 +2978,7 @@ static uint32 draw_police_lights(CAR_STATE *car)
                         packet_color->b = (uint8)rgb[component];
                 }
         }
+        draw_hd_police_light(idx);
         xport_gte_write_data(0, police_light_config.words[2 + idx * 2]);
         xport_gte_write_data(1, police_light_config.words[3 + idx * 2]);
         xport_gte_execute(0x180001);

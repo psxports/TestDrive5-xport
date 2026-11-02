@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "track_stream.h"
+#include "hd_track.h"
 #include "game.h"
 
 typedef struct TRACK_LINEAR_CACHE
@@ -199,6 +200,9 @@ static void stream_section_ready(void)
 
 static uint32 stream_queue_tex(uint32 rec)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5;
+
     const uint8 *data;
     TRACK_SECTION *entry;
     uint32 sector;
@@ -208,7 +212,7 @@ static uint32 stream_queue_tex(uint32 rec)
 
     FUNCTION_MARKER(0x80034804, "SLUS_006.10");
     data = track_stream.variants + rec * 18;
-    (void)xport_load_le16(data + 10);
+    (void)(memcpy(&wire_halfword_1, data + 10, sizeof(wire_halfword_1)), wire_halfword_1);
     entry = track_stream.sections + (uint32)((sint32)rec % 7);
     if (entry->buffer != 0)
         scene_pool_free(entry->buffer);
@@ -219,8 +223,8 @@ static uint32 stream_queue_tex(uint32 rec)
         track_stream.dir = 0xFFFFFFFF;
     track_stream.prev_section = rec;
     entry->tex_status = 4;
-    sector = xport_load_le16(data + 10);
-    sector += xport_load_le16(data + 4);
+    sector = (memcpy(&wire_halfword_2, data + 10, sizeof(wire_halfword_2)), wire_halfword_2);
+    sector += (memcpy(&wire_halfword_3, data + 4, sizeof(wire_halfword_3)), wire_halfword_3);
     size = data[2];
     if (size != 0 && track_stream.dir == 1)
     {
@@ -232,8 +236,8 @@ static uint32 stream_queue_tex(uint32 rec)
         stream_queue_read(1, buffer, size, stream_forward_ready, sector, NULL);
         track_stream.queued = 1;
     }
-    sector = xport_load_le16(data + 10);
-    sector += xport_load_le16(data + 6);
+    sector = (memcpy(&wire_halfword_4, data + 10, sizeof(wire_halfword_4)), wire_halfword_4);
+    sector += (memcpy(&wire_halfword_5, data + 6, sizeof(wire_halfword_5)), wire_halfword_5);
     size = data[3];
     result = size;
     if (size != 0)
@@ -256,6 +260,8 @@ static uint32 stream_queue_tex(uint32 rec)
 
 static uint32 stream_queue_section(uint32 rec, uint32 node, sint32 lane)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     uint32 variant;
     const uint8 *data;
     TRACK_SECTION *entry;
@@ -271,21 +277,21 @@ static uint32 stream_queue_section(uint32 rec, uint32 node, sint32 lane)
         variant = 3;
     if (variant == 2)
     {
-        sector = xport_load_le16(data + 10);
+        sector = (memcpy(&wire_halfword_1, data + 10, sizeof(wire_halfword_1)), wire_halfword_1);
         sector += data[0];
         size = data[1];
         entry->variant_mask = 2;
     }
     else if (variant == 1)
     {
-        sector = xport_load_le16(data + 10);
+        sector = (memcpy(&wire_halfword_2, data + 10, sizeof(wire_halfword_2)), wire_halfword_2);
         size = data[0];
         entry->variant_mask = 1;
     }
     else
     {
         /* The audited selector returns only 1, 2 or 3 */
-        sector = xport_load_le16(data + 10);
+        sector = (memcpy(&wire_halfword_3, data + 10, sizeof(wire_halfword_3)), wire_halfword_3);
         size = data[0];
         size += data[1];
         entry->variant_mask = 3;
@@ -303,6 +309,8 @@ static uint32 stream_queue_section(uint32 rec, uint32 node, sint32 lane)
 
 uint32 track_stream_init(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     char filename[64];
     uint32 val;
     uint32 level;
@@ -350,8 +358,8 @@ uint32 track_stream_init(void)
         XASSERT(!(variants_bytes - idx * 18 < 18));
         dst = track_stream.variants + idx * 18;
         src = track_stream.variants + idx * 18;
-        val = xport_load_le16(src + 8);
-        xport_store_le16(dst + 14, (uint16)(val + 19));
+        val = (memcpy(&wire_halfword_1, src + 8, sizeof(wire_halfword_1)), wire_halfword_1);
+        (wire_halfword_2 = (uint16)((uint16)(val + 19)), memcpy(dst + 14, &wire_halfword_2, sizeof(wire_halfword_2)));
         ++idx;
     }
     track_stream.section_count = idx;
@@ -421,6 +429,12 @@ static uint64 stream_draw_objects(void)
                         render_model.capacity = rec->buffer_bytes - object_offset;
                         model_draw_lod(&render_model);
                     }
+                    else if (hd_capture_active())
+                    {
+                        render_model.bytes = (uint8 *)object_bytes;
+                        render_model.capacity = rec->buffer_bytes - object_offset;
+                        hd_draw_static_candidate(&render_model, NULL);
+                    }
                 }
             }
             if (geometry[1] != 0 && (rec->variant_mask & 2) != 0)
@@ -456,6 +470,12 @@ static uint64 stream_draw_objects(void)
                         render_model.capacity = rec->buffer_bytes - object_offset;
                         model_draw_lod(&render_model);
                     }
+                    else if (hd_capture_active())
+                    {
+                        render_model.bytes = (uint8 *)object_bytes;
+                        render_model.capacity = rec->buffer_bytes - object_offset;
+                        hd_draw_static_candidate(&render_model, NULL);
+                    }
                 }
             }
         }
@@ -465,6 +485,8 @@ static uint64 stream_draw_objects(void)
 
 uint32 track_stream_draw(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     VEC3 model_pos;
     MODEL_RESOURCE render_model;
     uint8 *level_header;
@@ -495,10 +517,10 @@ uint32 track_stream_draw(void)
     FUNCTION_MARKER(0x80035390, "SLUS_006.10");
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    near_distance = (sint16)xport_load_le16(level_header + 4);
+    near_distance = (sint16)(memcpy(&wire_halfword_1, level_header + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
-    far_distance = (sint16)xport_load_le16(level_header + 6);
+    far_distance = (sint16)(memcpy(&wire_halfword_2, level_header + 6, sizeof(wire_halfword_2)), wire_halfword_2);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
     r = level_header[0];
@@ -514,8 +536,22 @@ uint32 track_stream_draw(void)
     SetFogNearFar(15000, 60000, 160);
     level_desc = &scene_level_image.desc;
     level_header = (uint8 *)(scene_level_image.bytes + (uint32)(level_desc->header_offset));
+    if (hd_track_ready() && hd_capture_active())
+    {
+        if (!hd_native_capture_required())
+        {
+            hd_track_draw(0);
+            return 7;
+        }
+        hd_original_track_capture(0);
+    }
     if ((level_header[30] & 1) != 0)
-        return stream_draw_objects();
+    {
+        uint64 result = stream_draw_objects();
+        hd_original_track_capture(1);
+        hd_track_draw(0);
+        return (uint32)result;
+    }
     x = model_render.view.words[0];
     y = model_render.view.words[1];
     xport_gte_write_control(0, x);
@@ -557,6 +593,12 @@ uint32 track_stream_draw(void)
                     render_model.capacity = desc->buffer_bytes - object_offset;
                     model_draw(&render_model);
                 }
+                else if (hd_capture_active())
+                {
+                    render_model.bytes = (uint8 *)object_bytes;
+                    render_model.capacity = desc->buffer_bytes - object_offset;
+                    hd_draw_static_candidate(&render_model, NULL);
+                }
             }
         }
         if (geometry[1] == 0)
@@ -594,8 +636,16 @@ uint32 track_stream_draw(void)
                 render_model.capacity = desc->buffer_bytes - object_offset;
                 model_draw(&render_model);
             }
+            else if (hd_capture_active())
+            {
+                render_model.bytes = (uint8 *)object_bytes;
+                render_model.capacity = desc->buffer_bytes - object_offset;
+                hd_draw_static_candidate(&render_model, NULL);
+            }
         }
     }
+    hd_original_track_capture(1);
+    hd_track_draw(0);
     return 7;
 }
 
@@ -723,6 +773,8 @@ uint32 track_stream_release_pending(void)
 
 static uint32 stream_count_intervals(void)
 {
+    uint16 wire_halfword_1;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
 
     const uint8 *entry;
@@ -732,7 +784,7 @@ static uint32 stream_count_intervals(void)
     level_desc = &scene_level_image.desc;
     entry = scene_level_image.bytes + (level_desc->stream_intervals_offset);
     stream_interval_count = 0;
-    while (xport_load_le16(entry) != 0xFFFF)
+    while ((memcpy(&wire_halfword_1, entry, sizeof(wire_halfword_1)), wire_halfword_1) != 0xFFFF)
     {
         count = stream_interval_count;
         stream_interval_count = count + 1;
@@ -743,6 +795,8 @@ static uint32 stream_count_intervals(void)
 
 static uint32 stream_select_variant(sint32 node, sint32 lane)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
 
     const uint8 *entry;
@@ -754,9 +808,9 @@ static uint32 stream_select_variant(sint32 node, sint32 lane)
     entry = scene_level_image.bytes + (level_desc->stream_intervals_offset);
     for (idx = 0; (sint32)idx < (sint32)stream_interval_count; ++idx)
     {
-        if (node >= xport_load_le16(entry) && node <= xport_load_le16(entry + 2))
+        if (node >= (memcpy(&wire_halfword_1, entry, sizeof(wire_halfword_1)), wire_halfword_1) && node <= (memcpy(&wire_halfword_2, entry + 2, sizeof(wire_halfword_2)), wire_halfword_2))
         {
-            if (xport_load_le16(entry + 4) == 0)
+            if ((memcpy(&wire_halfword_3, entry + 4, sizeof(wire_halfword_3)), wire_halfword_3) == 0)
                 return 3;
             if (lane < (sint32)track_geometry.main_node_count)
                 return 1;
@@ -791,6 +845,15 @@ uint32 track_stream_draw_linear(uint32 slot)
     {
         model_update_distance_reference(&car_states[0].transform, &car_states[0].pos);
     }
+    if (hd_track_ready() && hd_capture_active())
+    {
+        if (!hd_native_capture_required())
+        {
+            hd_track_draw(slot);
+            return 0;
+        }
+        hd_original_track_capture(0);
+    }
     rotation0 = model_render.view.words[0];
     rotation1 = model_render.view.words[1];
     xport_gte_write_control(0, rotation0);
@@ -803,7 +866,10 @@ uint32 track_stream_draw_linear(uint32 slot)
     xport_gte_write_control(4, rotation4);
     count = (sint32)linear_cache.pair_count;
     if (count <= 0)
+    {
+        hd_original_track_capture(1);
         return mode != 0 ? slot * 2 : (uint32)count;
+    }
     entry = linear_cache.entries + slot;
     idx = 0;
     do
@@ -836,6 +902,12 @@ uint32 track_stream_draw_linear(uint32 slot)
                     else
                         model_draw(&render_model);
                 }
+                else if (hd_capture_active())
+                {
+                    render_model.bytes = (uint8 *)object_bytes;
+                    render_model.capacity = entry->buffer_bytes - offset;
+                    hd_draw_static_candidate(&render_model, NULL);
+                }
                 ++object_idx;
             } while ((sint32)object_idx < object_count);
         }
@@ -844,6 +916,8 @@ uint32 track_stream_draw_linear(uint32 slot)
         if ((sint32)idx < count)
             entry += 2;
     } while ((sint32)idx < count);
+    hd_original_track_capture(1);
+    hd_track_draw(slot);
     return 0;
 }
 
@@ -865,6 +939,7 @@ uint32 track_stream_init_linear(void)
     sint32 formatted;
 
     FUNCTION_MARKER(0x80049364, "SLUS_006.10");
+    hd_forget_span(track_linear_image.bytes, track_linear_image.size);
     free(track_linear_image.bytes);
     track_linear_image = (TRACK_LINEAR_IMAGE){0};
     result = race_session.linear_course;
@@ -1107,4 +1182,39 @@ uint32 track_stream_wait_for_load(void)
         stream_update();
         track_stream_upload_images();
     }
+}
+
+uint32 track_stream_section_count(void)
+{
+    return track_stream.section_count;
+}
+
+uint32 track_stream_variant(sint32 node, sint32 lane)
+{
+    uint32 variant = stream_select_variant(node, lane);
+    if (track_stream.variants[(uint32)(node / 20) * 18 + 1] == 0)
+        variant = 3;
+    return variant;
+}
+
+sint32 track_stream_hd_resident(uint32 slot, uint32 section, uint32 variant)
+{
+    uint32 index;
+    if (race_session.linear_course)
+    {
+        for (index = 0; index < linear_cache.pair_count; ++index)
+        {
+            const TRACK_LINEAR_ENTRY *entry = &linear_cache.entries[index * 2 + slot];
+            if (entry->state == 2 && entry->section == section)
+                return 1;
+        }
+    }
+    else
+        for (index = 0; index < 7; ++index)
+        {
+            const TRACK_SECTION *entry = &track_stream.sections[index];
+            if (entry->geometry_status == 2 && entry->section_idx == section && (entry->variant_mask & variant) == variant)
+                return 1;
+        }
+    return 0;
 }

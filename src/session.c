@@ -743,6 +743,24 @@ void session_reset_progression(void)
     progression_profile.track_availability[15] = (uint8)(1);
 }
 
+uint32 session_track_availability(uint32 track)
+{
+    XASSERT(track < sizeof(progression_profile.track_availability));
+#if defined(_DEBUG) && !defined(LOCKSTEP_DEBUG)
+    switch (track)
+    {
+        case 1:
+        case 2:
+        case 6:
+        case 22:
+        case 24:
+        case 37:
+            return 2;
+    }
+#endif
+    return progression_profile.track_availability[track];
+}
+
 void session_unlock_bonus_models(void)
 {
     uint32 idx;

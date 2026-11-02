@@ -9,6 +9,7 @@ typedef struct MINIMAP_POINT
 {
     uint32 x;
     uint32 y;
+    VECTORF hd;
 } MINIMAP_POINT;
 
 typedef struct MINIMAP_FIXED_PACKETS
@@ -44,6 +45,8 @@ typedef char MINIMAP_ROAD_PACKET_LAYOUT_CHECK[sizeof(POLY_F4) == 24 ? 1 : -1];
 
 static MINIMAP_POINT project_minimap_point(const uint8 *seg, const uint8 *vertex, uint32 origin_x, uint32 origin_z, uint32 c, uint32 s, uint32 scale_x, uint32 scale_z)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 wire_word_1, wire_word_2;
     MINIMAP_POINT point;
     uint32 x;
@@ -51,10 +54,13 @@ static MINIMAP_POINT project_minimap_point(const uint8 *seg, const uint8 *vertex
     uint32 val;
     uint32 component;
 
-    component = (sint16)xport_load_le16(vertex);
+    component = (sint16)(memcpy(&wire_halfword_1, vertex, sizeof(wire_halfword_1)), wire_halfword_1);
     x = (memcpy(&wire_word_1, seg + 12, sizeof(wire_word_1)), wire_word_1) + component + origin_x;
-    component = (sint16)xport_load_le16(vertex + 4);
+    point.hd.vx = (float)(sint32)wire_word_1 + (sint32)component;
+    component = (sint16)(memcpy(&wire_halfword_2, vertex + 4, sizeof(wire_halfword_2)), wire_halfword_2);
     z = (memcpy(&wire_word_2, seg + 20, sizeof(wire_word_2)), wire_word_2) + component + origin_z;
+    point.hd.vy = 0.0f;
+    point.hd.vz = (float)(sint32)wire_word_2 + (sint32)component;
     val = x * c + z * s;
     val = (uint32)((sint32)val / 4096) * scale_x;
     point.x = (uint32)((sint32)val / 65536) + 50;
@@ -64,8 +70,16 @@ static MINIMAP_POINT project_minimap_point(const uint8 *seg, const uint8 *vertex
     return point;
 }
 
+static void draw_hd_minimap_road(const MINIMAP_POINT *a, const MINIMAP_POINT *b, const MINIMAP_POINT *c, const MINIMAP_POINT *d, const RGBC *color)
+{
+    VECTORF points[4] = {a->hd, b->hd, c->hd, d->hd};
+    hd_minimap_quad(points, color);
+}
+
 uint32 minimap_init(void)
 {
+    uint16 wire_halfword_1;
+
     DRAWENV environment;
     uint32 result;
     uint32 buffer;
@@ -212,7 +226,7 @@ uint32 minimap_init(void)
                 minimap_routes[total].first_node = (uint16)(start);
                 start = idx;
                 minimap_routes[total].last_node = (uint16)(idx - 1);
-                val = xport_load_le16(src_link);
+                val = (memcpy(&wire_halfword_1, src_link, sizeof(wire_halfword_1)), wire_halfword_1);
                 minimap_routes[total].alternate_first = (uint16)(val);
                 ++total;
             }
@@ -254,6 +268,9 @@ uint32 minimap_init(void)
 
 uint32 minimap_draw(CAR_STATE *car)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7;
+
     const SCENE_LEVEL_DESCRIPTOR *level_desc;
     uint32 result;
     uint32 angle;
@@ -313,6 +330,11 @@ uint32 minimap_draw(CAR_STATE *car)
     result = race_session.linear_course;
     if (result != 0)
         return result;
+    {
+        sint32 top = 168 - (disp_state.cur->draw.ofs[1] & 255);
+        hd_ui_anchor(-1);
+        hd_ui_region((VID_RECT){30, top, 100, 64}, 30.0f, (float)top);
+    }
     angle = 2048 - (uint32)(car->orientation.y >> 8);
     c = (uint32)rcos((sint32)angle);
     s = (uint32)rsin((sint32)angle);
@@ -324,6 +346,7 @@ uint32 minimap_draw(CAR_STATE *car)
     scale_x = ((sint32)(val * 56) / 4096);
     val = model_render.y_scale;
     scale_z = ((sint32)(val * 56) / 4096);
+    hd_minimap_begin(car, (sint32)scale_x / 65536.0f, (sint32)scale_z / 65536.0f);
     buffer_idx = disp_state.bank;
     node = (sint16)car_states[0].track_location.n_node;
     val = race_control.car_count;
@@ -369,6 +392,7 @@ uint32 minimap_draw(CAR_STATE *car)
                     car_poly->p[2].y = (sint16)(uint16)(z + 33);
                     car_poly->p[3].x = (sint16)(uint16)(x + 52);
                     car_poly->p[3].y = (sint16)(uint16)(z + 33);
+                    hd_minimap_car(car_idx, &car_poly->rgbc);
                     disp_link_front_packet(cur_frame, &car_poly->tag);
                 }
             }
@@ -420,7 +444,7 @@ uint32 minimap_draw(CAR_STATE *car)
         {
             data = level_desc->checkpoints_offset;
             XASSERT(!(scene_level_image.size < 6 || data > scene_level_image.size - 6 || idx > (scene_level_image.size - 6 - data) / 4));
-            val = xport_load_le16(scene_level_image.bytes + data + idx * 4 + 4);
+            val = (memcpy(&wire_halfword_1, scene_level_image.bytes + data + idx * 4 + 4, sizeof(wire_halfword_1)), wire_halfword_1);
             if ((sint32)val >= node && (sint32)val < (sint32)((uint32)node + 144))
             {
                 special = val;
@@ -470,7 +494,7 @@ uint32 minimap_draw(CAR_STATE *car)
             seg_base = track_geometry.node_bytes;
             special_offset = special * 24;
             seg = seg_base + special_offset;
-            idx = xport_load_le16(seg + 6);
+            idx = (memcpy(&wire_halfword_2, seg + 6, sizeof(wire_halfword_2)), wire_halfword_2);
             vertex_base = track_geometry.vertex_bytes;
             vertex = vertex_base + idx * 6;
             v0 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
@@ -486,6 +510,7 @@ uint32 minimap_draw(CAR_STATE *car)
             boundary_line->p[0].y = (sint16)(uint16)(v0.y);
             boundary_line->p[1].x = (sint16)(uint16)(v1.x);
             boundary_line->p[1].y = (sint16)(uint16)(v1.y);
+            hd_minimap_line(&v0.hd, &v1.hd, &boundary_line->rgbc);
             disp_link_front_packet(cur_frame, &boundary_line->tag);
             alternate = (sint16)(minimap_routes[row_offset / 6].alternate_first);
             if (alternate != -1)
@@ -493,7 +518,7 @@ uint32 minimap_draw(CAR_STATE *car)
                 row_start = (sint16)(minimap_routes[row_offset / 6].first_node);
                 mapped_end = ((uint32)end_node + (uint32)alternate - (uint32)row_start) * 24;
                 seg = seg_base + mapped_end;
-                idx = xport_load_le16(seg + 6);
+                idx = (memcpy(&wire_halfword_3, seg + 6, sizeof(wire_halfword_3)), wire_halfword_3);
                 vertex = vertex_base + idx * 6;
                 v0 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
                 type = seg[0];
@@ -507,13 +532,14 @@ uint32 minimap_draw(CAR_STATE *car)
                 boundary_line->p[0].y = (sint16)(uint16)(v0.y);
                 boundary_line->p[1].x = (sint16)(uint16)(v1.x);
                 boundary_line->p[1].y = (sint16)(uint16)(v1.y);
+                hd_minimap_line(&v0.hd, &v1.hd, &boundary_line->rgbc);
                 disp_link_front_packet(cur_frame, &boundary_line->tag);
             }
             special = 9999;
         }
         seg_base = track_geometry.node_bytes;
         seg = seg_base + (uint32)node * 24;
-        idx = xport_load_le16(seg + 4);
+        idx = (memcpy(&wire_halfword_4, seg + 4, sizeof(wire_halfword_4)), wire_halfword_4);
         vertex_base = track_geometry.vertex_bytes;
         vertex = vertex_base + idx * 6;
         v0 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
@@ -523,7 +549,7 @@ uint32 minimap_draw(CAR_STATE *car)
         v1 = project_minimap_point(seg, vertex + (sint32)(vertex_offset * 6), origin_x, origin_z, c, s, scale_x, scale_z);
         mapped_end = (uint32)end_node * 24;
         seg = seg_base + mapped_end;
-        idx = xport_load_le16(seg + 6);
+        idx = (memcpy(&wire_halfword_5, seg + 6, sizeof(wire_halfword_5)), wire_halfword_5);
         vertex = vertex_base + idx * 6;
         v2 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
         type = seg[0];
@@ -541,6 +567,7 @@ uint32 minimap_draw(CAR_STATE *car)
         poly->p[2].y = (sint16)(uint16)(v2.y);
         poly->p[3].x = (sint16)(uint16)(v3.x);
         poly->p[3].y = (sint16)(uint16)(v3.y);
+        draw_hd_minimap_road(&v0, &v1, &v2, &v3, &poly->rgbc);
         disp_link_front_packet(cur_frame, &poly->tag);
         alternate = (sint16)(minimap_routes[row_offset / 6].alternate_first);
         if (alternate != -1)
@@ -548,7 +575,7 @@ uint32 minimap_draw(CAR_STATE *car)
             row_start = (sint16)(minimap_routes[row_offset / 6].first_node);
             mapped_start = ((uint32)node + (uint32)alternate - (uint32)row_start) * 24;
             seg = seg_base + mapped_start;
-            idx = xport_load_le16(seg + 4);
+            idx = (memcpy(&wire_halfword_6, seg + 4, sizeof(wire_halfword_6)), wire_halfword_6);
             vertex_base = track_geometry.vertex_bytes;
             vertex = vertex_base + idx * 6;
             v0 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
@@ -559,7 +586,7 @@ uint32 minimap_draw(CAR_STATE *car)
             v1 = project_minimap_point(seg, vertex + (sint32)(vertex_offset * 6), origin_x, origin_z, c, s, scale_x, scale_z);
             seg_base = track_geometry.node_bytes;
             seg = seg_base + mapped_end;
-            idx = xport_load_le16(seg + 6);
+            idx = (memcpy(&wire_halfword_7, seg + 6, sizeof(wire_halfword_7)), wire_halfword_7);
             vertex = vertex_base + idx * 6;
             v2 = project_minimap_point(seg, vertex, origin_x, origin_z, c, s, scale_x, scale_z);
             type = seg[0];
@@ -575,6 +602,7 @@ uint32 minimap_draw(CAR_STATE *car)
             alternate_poly->p[2].y = (sint16)(uint16)(v2.y);
             alternate_poly->p[3].x = (sint16)(uint16)(v3.x);
             alternate_poly->p[3].y = (sint16)(uint16)(v3.y);
+            draw_hd_minimap_road(&v0, &v1, &v2, &v3, &alternate_poly->rgbc);
             disp_link_front_packet(cur_frame, &alternate_poly->tag);
         }
         val = track_geometry.main_node_count;
@@ -591,10 +619,17 @@ uint32 minimap_draw(CAR_STATE *car)
     } while (i < 24);
     buffer_idx = disp_state.bank;
     cur_frame = disp_state.cur;
+    hd_ui_color_quad(fixed_packets.background[buffer_idx].p, &fixed_packets.background[buffer_idx].rgbc, 0);
+    hd_ui_region_end();
     disp_link_front_packet(cur_frame, &fixed_packets.background[buffer_idx].tag);
     disp_link_front_packet(cur_frame, &fixed_packets.draw_environment[buffer_idx].tag);
+    hd_ui_line(fixed_packets.border[0][buffer_idx].p, &fixed_packets.border[0][buffer_idx].rgbc, 0);
     disp_link_front_packet(cur_frame, &fixed_packets.border[0][buffer_idx].tag);
+    hd_ui_line(fixed_packets.border[1][buffer_idx].p, &fixed_packets.border[1][buffer_idx].rgbc, 0);
     disp_link_front_packet(cur_frame, &fixed_packets.border[1][buffer_idx].tag);
+    hd_ui_line(fixed_packets.border[2][buffer_idx].p, &fixed_packets.border[2][buffer_idx].rgbc, 0);
     disp_link_front_packet(cur_frame, &fixed_packets.border[2][buffer_idx].tag);
+    hd_ui_line(fixed_packets.border[3][buffer_idx].p, &fixed_packets.border[3][buffer_idx].rgbc, 0);
+    hd_ui_anchor(0);
     return disp_link_front_packet(cur_frame, &fixed_packets.border[3][buffer_idx].tag);
 }

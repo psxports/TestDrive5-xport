@@ -42,6 +42,7 @@ extern ASSET_STREAM asset_stream;
 
 STREAM_REQUEST *stream_clear_slot(uint32 slot);
 STREAM_REQUEST *stream_init(uint32 reset_mode);
+void asset_prepare_stream_cache(uint32 slot);
 uint32 stream_update(void);
 uint32 stream_queue_read(uint32 slot, void *dst, uint32 sector_count, STREAM_CALLBACK complete, uint16 sector, uint8 **dst_owner);
 

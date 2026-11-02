@@ -9,6 +9,7 @@ uint32 wheels_init_race(void);
 uint32 wheels_init_preview(void);
 
 uint32 wheels_draw_race(uint32 slot);
+void wheels_draw_hd_race(uint32 slot);
 uint32 wheels_draw_preview(void);
 
 uint32 wheels_init_sides(uint32 slot, sint32 wheel_radius, sint32 wheel_width);

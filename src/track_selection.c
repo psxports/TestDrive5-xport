@@ -35,7 +35,7 @@ static void collect_available_tracks(const sint16 *list, uint32 limit, uint32 ca
         val = list[idx];
         if (val == -1)
             return;
-        if (progression_profile.track_availability[(uint32)val] == category)
+        if (session_track_availability((uint32)val) == category)
         {
             count = track_selection.count;
             item = ((uint32)val - 1) | flags;
@@ -86,6 +86,8 @@ void track_selection_build_list(void)
 
 void track_selection_prepare_previews(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 wire_word_4, wire_word_8, wire_word_9, wire_word_10;
     uint8 *owner;
     const uint8 *src;
@@ -130,11 +132,11 @@ void track_selection_prepare_previews(void)
         memcpy(&words[0], src + 0x7FF0, sizeof(words[0]));
         memcpy(&words[1], src + 0x7FF4, sizeof(words[1]));
         memcpy(&words[2], src + 0x7FF8, sizeof(words[2]));
-        val = (sint16)xport_load_le16(src + 0x7FFC);
+        val = (sint16)(memcpy(&wire_halfword_1, src + 0x7FFC, sizeof(wire_halfword_1)), wire_halfword_1);
         (wire_word_8 = (uint32)(words[0]), memcpy(dst + 0x7FF0, &wire_word_8, sizeof(wire_word_8)));
         (wire_word_9 = (uint32)(words[1]), memcpy(dst + 0x7FF4, &wire_word_9, sizeof(wire_word_9)));
         (wire_word_10 = (uint32)(words[2]), memcpy(dst + 0x7FF8, &wire_word_10, sizeof(wire_word_10)));
-        xport_store_le16(dst + 0x7FFC, (uint32)val);
+        (wire_halfword_2 = (uint16)((uint32)val), memcpy(dst + 0x7FFC, &wire_halfword_2, sizeof(wire_halfword_2)));
         val = (sint8)src[0x7FFE];
         dst[0x7FFE] = val;
     }
@@ -143,7 +145,7 @@ void track_selection_prepare_previews(void)
     for (idx = 0; idx < 6; ++idx)
     {
         val = (sint16)session_multiplayer_tracks[idx];
-        if (progression_profile.track_availability[(uint32)val] == 2)
+        if (session_track_availability((uint32)val) == 2)
         {
             count = track_selection.count;
             track_selection.entries[count] = (uint32)((uint32)val - 1);

@@ -33,6 +33,7 @@ typedef struct PROGRESSION_PROFILE
 extern PROGRESSION_PROFILE progression_profile;
 
 void session_reset_progression(void);
+uint32 session_track_availability(uint32 track);
 void session_unlock_bonus_tracks(void);
 void session_unlock_bonus_models(void);
 void session_unlock_features(void);

@@ -263,7 +263,6 @@ uint32 car_selection_begin(uint32 mode)
     free(compressed_input.bytes);
     compressed_input.bytes = NULL;
     compressed_input.capacity = 0;
-    car_selection.refresh_frames = (0);
     if (mode == 0)
     {
         car_selection.tuning[0] = (uint16)(0);
@@ -333,7 +332,6 @@ uint32 car_selection_begin(uint32 mode)
 void car_selection_update(uint32 mode)
 {
     uint32 angle, sel, idx, count, state, val, height, buttons;
-    const char *text;
     uint32 size;
     uint8 *allocation;
     const char *const *filename_slot;
@@ -375,20 +373,6 @@ void car_selection_update(uint32 mode)
             car_selection.transition_depth = (0);
             car_selection.sel_entry = ((uint32)signed_selection);
             draw_preview();
-            draw_labels();
-            presentation_select_pal(3);
-            idx = car_selection.list_idx;
-            sel = (uint8)car_selection.entries[idx];
-            height = disp_state.pal;
-            text = ((uint32)(sel) < 44 ? session_model_names[sel] : "");
-            presentation_draw_text(128, 256, (sint32)((height << 3) + 140), text);
-            if ((car_selection.sel_entry & 0x100) != 0)
-            {
-                presentation_select_pal(3);
-                height = disp_state.pal;
-                text = "(LOCKED)";
-                presentation_draw_text(128, 256, (sint32)((height << 3) + 148), text);
-            }
             val = car_selection.input_port;
             if ((input_ports[val].pressed & 0x20) != 0)
             {
@@ -396,7 +380,6 @@ void car_selection_update(uint32 mode)
                 idx = car_selection.list_idx;
                 if (idx < count - 1)
                 {
-                    car_selection.refresh_frames = (0);
                     car_selection.list_idx = (idx + 1);
                     audio_play_menu_high();
                 }
@@ -407,7 +390,6 @@ void car_selection_update(uint32 mode)
                 idx = car_selection.list_idx;
                 if (idx != 0)
                 {
-                    car_selection.refresh_frames = (0);
                     car_selection.list_idx = (idx - 1);
                     audio_play_menu_high();
                 }
@@ -416,7 +398,6 @@ void car_selection_update(uint32 mode)
             if ((input_ports[val].pressed & 0x1000) != 0)
             {
                 audio_play_menu_accept();
-                car_selection.refresh_frames = (0);
                 if (mode == 0 || race_session.cup != 3 || race_session.event_mode != 2)
                 {
                     car_selection.phase = (13);
@@ -448,11 +429,6 @@ void car_selection_update(uint32 mode)
                 finish_load();
             }
             car_selection.sel_entry = ((uint32)signed_selection);
-            val = car_selection.refresh_frames + 1;
-            car_selection.refresh_frames = (val);
-            /* Populate both retained text buffers before leaving the refresh phase */
-            if (val < 3)
-                return;
             if (car_selection.models[sel].state != 0)
             {
                 car_selection.phase = (2);
@@ -550,10 +526,8 @@ void car_selection_update(uint32 mode)
                     idx = car_selection.list_idx + 1;
                     signed_selection = (sint16)car_selection.entries[idx];
                     car_selection.phase = (0);
-                    car_selection.refresh_frames = (0);
                     car_selection.list_idx = (idx);
                     car_selection.sel_entry = ((uint32)signed_selection);
-                    draw_labels();
                 }
             }
             val = car_selection.input_port;
@@ -563,10 +537,8 @@ void car_selection_update(uint32 mode)
                 idx = car_selection.list_idx - 1;
                 signed_selection = (sint16)car_selection.entries[idx];
                 car_selection.phase = (0);
-                car_selection.refresh_frames = (0);
                 car_selection.list_idx = (idx);
                 car_selection.sel_entry = ((uint32)signed_selection);
-                draw_labels();
             }
             return;
         case 6:
@@ -734,7 +706,7 @@ exit_to_game:
 
 static uint32 draw_labels(void)
 {
-    char *text;
+    char text[128];
     const char *label, *val;
     size_t bytes;
     uint32 sel, column, idx, y, x;
@@ -742,6 +714,11 @@ static uint32 draw_labels(void)
     FUNCTION_MARKER(0x800B44F8, "SLUS_006.10");
     idx = car_selection.list_idx;
     sel = (uint8)car_selection.entries[idx];
+    presentation_select_pal(3);
+    y = (disp_state.pal << 3) + 140;
+    presentation_draw_text(128, 256, (sint32)y, sel < 44 ? session_model_names[sel] : "");
+    if ((car_selection.sel_entry & 0x100) != 0)
+        presentation_draw_text(128, 256, (sint32)(y + 8), "(LOCKED)");
     presentation_select_pal(0);
     for (column = 0; column < 2; ++column)
     {
@@ -753,11 +730,9 @@ static uint32 draw_labels(void)
             label = specification_labels[column][idx];
             val = sel < 37 ? specification_vals[sel][column][idx] : "";
             bytes = strlen(label) + strlen(val) + 1;
-            text = (char *)malloc(bytes);
-            XASSERT(!(text == NULL));
+            XASSERT(bytes <= sizeof(text));
             sprintf(text, "%s%s", label, val);
             presentation_draw_text(1, x, (sint32)y, text);
-            free(text);
             y += 8;
         }
     }
@@ -773,8 +748,8 @@ static uint32 upload_colors(void)
 
     FUNCTION_MARKER(0x800B4CBC, "SLUS_006.10");
     tex = tex_find(body_tex_name);
-    clut = xport_load_le16(tex + 10);
-    page = xport_load_le16(tex + 8);
+    clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
+    page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     idx = car_selection.primary_color;
     buffer = &car_selection.active_buffer;
     image_offset = (idx << 2) + 16;
@@ -786,9 +761,9 @@ static uint32 upload_colors(void)
     XASSERT(!(image_offset > buffer->capacity));
     tex_upload_tim(buffer->bytes + image_offset, buffer->capacity - image_offset, (sint16)image_x, (sint16)image_y, (sint16)((clut & 63) << 4), (sint16)((clut >> 6) & 255));
     tex = tex_find(wheel_standard_tex_name);
-    page = xport_load_le16(tex + 8);
+    page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     u = tex[14];
-    clut = xport_load_le16(tex + 10);
+    clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     v = tex[15];
     idx = car_selection.secondary_color;
     buffer = &car_selection.active_buffer;
@@ -867,6 +842,7 @@ static uint32 draw_tuning(void)
             head_address.tags = cur_frame->ordering;
             head_address.byte_offset = 0;
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
+            hd_ui_line(line->p, &line->rgbc, 0);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)line);
             ++x;
         }
@@ -888,6 +864,7 @@ static uint32 draw_tuning(void)
             head_address.tags = cur_frame->ordering;
             head_address.byte_offset = 0;
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
+            hd_ui_line(line->p, &line->rgbc, 0);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)line);
         }
         bank = disp_state.bank;
@@ -912,6 +889,7 @@ static uint32 draw_tuning(void)
             head_address.tags = cur_frame->ordering;
             head_address.byte_offset = 0;
             head = head_address.tags[(sint32)head_address.byte_offset / 4];
+            hd_ui_gradient(gradient->p, 0);
             head_address.tags[(sint32)head_address.byte_offset / 4] = (head & 0xFF000000) | gpu_packet_link((uintptr_t)gradient);
         }
         presentation_select_pal(car_selection.tuning_row == row ? 1 : 0);
@@ -1145,6 +1123,7 @@ static uint32 draw_preview(void)
     VECTOR relative = {0};
 
     FUNCTION_MARKER(0x800B46D8, "SLUS_006.10");
+    draw_labels();
     height = car_selection.vertical_offset;
     val0 = preview_matrix_default.words[0];
     val1 = preview_matrix_default.words[1];
@@ -1218,6 +1197,7 @@ static uint32 draw_preview(void)
             model_transform_matrix(&matrix.sdk, &model_pos);
             val = (uint32)dx * (uint32)dx + (uint32)dy * (uint32)dy + (uint32)dz * (uint32)dz;
             val = fixed_sqrt(val);
+            hd_environment_reflection(&model, &car_environment_render.mapping, 0);
             car_draw_environment_mapping(&model, &car_environment_render.mapping, val << 2);
             model_draw(&model);
             wheels_draw_preview();
@@ -1311,6 +1291,8 @@ static const char preview_tex_name[] = "blk";
 
 static intptr prepare_preview_tex(const MODEL_RESOURCE *model)
 {
+    uint16 wire_halfword_1;
+
     uint32 records, offset0, offset1, offset, type, clut, val;
     const uint8 *tex;
     POLY_FT3 *tri0;
@@ -1333,13 +1315,13 @@ static intptr prepare_preview_tex(const MODEL_RESOURCE *model)
     do
     {
         type = model->bytes[records + 2];
-        count = (sint16)xport_load_le16(model->bytes + records);
+        count = (sint16)(memcpy(&wire_halfword_1, model->bytes + records, sizeof(wire_halfword_1)), wire_halfword_1);
         records += 4;
         for (idx = 0; type <= 3 && idx < count; ++idx)
         {
             if (type == 0)
             {
-                clut = xport_load_le16(tex + 10);
+                clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
                 XASSERT(!(offset0 > model->capacity || sizeof(*tri0) > model->capacity - offset0));
                 tri0 = (POLY_FT3 *)(model->bytes + offset0);
                 tri0->p[0].attr = (uint16)clut;
@@ -1352,7 +1334,7 @@ static intptr prepare_preview_tex(const MODEL_RESOURCE *model)
             }
             else if (type == 1)
             {
-                clut = xport_load_le16(tex + 10);
+                clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
                 XASSERT(!(offset0 > model->capacity || sizeof(*quad0) > model->capacity - offset0));
                 quad0 = (POLY_FT4 *)(model->bytes + offset0);
                 quad0->p[0].attr = (uint16)clut;
@@ -1404,6 +1386,7 @@ static uint32 finish_load(void)
     buffer = acquire_buffer(slot);
     entry->buffer = buffer;
     XASSERT(!(size > 0x32000));
+    hd_forget_span(buffer, 0x32000);
     rnc_decode(compressed_input.bytes, compressed_input.capacity, buffer, (sint32)size);
     // Publish only the decoded model payload
     size -= 1024;
@@ -1565,6 +1548,8 @@ static uint8 *acquire_buffer(uint32 slot)
 
 static uint32 init_wheel_geometry(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     const CAR_SELECTION_BUFFER *buffer;
     const uint8 *data;
     uint32 offset;
@@ -1575,7 +1560,7 @@ static uint32 init_wheel_geometry(void)
     memcpy(&offset, buffer->bytes + 0x54, sizeof(offset));
     XASSERT(!(offset > buffer->capacity || buffer->capacity - offset < 134));
     data = buffer->bytes + offset;
-    return wheels_init_sides(0, (sint16)xport_load_le16(data + 130), (sint16)xport_load_le16(data + 132));
+    return wheels_init_sides(0, (sint16)(memcpy(&wire_halfword_1, data + 130, sizeof(wire_halfword_1)), wire_halfword_1), (sint16)(memcpy(&wire_halfword_2, data + 132, sizeof(wire_halfword_2)), wire_halfword_2));
 }
 
 uint32 car_selection_build_list(void)

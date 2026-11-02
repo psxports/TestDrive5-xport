@@ -55,7 +55,7 @@ void audio_update_spatial(void);
 uint32 audio_bind_engine_src(uint32 slot);
 uint32 audio_set_car_engine_gain(sint32 amount, uint32 slot);
 
-void audio_fade(void);
+void audio_fade(uint32 volume);
 sint32 audio_update_cd_volume(void);
 sint32 audio_play_xa(sint32 track);
 sint32 audio_poll_xa(void);

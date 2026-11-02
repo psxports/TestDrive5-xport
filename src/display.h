@@ -26,7 +26,7 @@ typedef struct DISPLAY_STATE
     uint32 frame_count;
     uint32 ordering_count;
     uint32 field_rate;
-    uint32 time_step;
+    uint32 time_step; // fixed quantum selected by NTSC/PAL mode, never elapsed host time
     uint32 pal;
     uint32 mode;
     uint32 pre_sync_ticks;
@@ -41,6 +41,18 @@ typedef struct DISPLAY_OPTIONS
 
 extern DISPLAY_OPTIONS disp_options;
 extern DISPLAY_STATE disp_state;
+
+typedef struct DISPLAY_CLOCK
+{
+    uint64 field;
+    uint32 fields;
+    uint32 steps;
+    uint32 scene;
+    sint32 mode;
+} DISPLAY_CLOCK;
+
+void disp_clock_init(DISPLAY_CLOCK *clock, uint32 fields, uint32 scene);
+sint32 disp_clock_step(DISPLAY_CLOCK *clock, uint32 scene);
 
 uint32 disp_prepare(uint32 mode);
 DISPLAY_FRAME *disp_swap(void);

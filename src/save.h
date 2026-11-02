@@ -14,6 +14,8 @@ uint32 save_decode_progress(const uint8 *src, uint32 capacity);
 
 sint32 save_write_game(void);
 
+void save_autosave(void);
+
 sint32 save_load_game(void);
 
 #endif

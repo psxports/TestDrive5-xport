@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include <stdlib.h>
+#include <math.h>
 
 #include "psx_gpu.h"
 #include "wheels.h"
@@ -39,6 +40,108 @@ static POLY_F4 side_packets[2][6][4][8];
 
 static uint32 draw_sides(uint32 slot, uint32 wheel);
 
+static void draw_hd_wheel(uint32 slot, uint32 wheel, const SVECTOR *center, float steering, float spin, float radius, float width, const WHEEL_TEXTURE *tex, float spin_period)
+{
+    MATRIXF base = hd_model_transform(), transform, turn;
+    VECTORF local_center = {(float)center->vx, (float)center->vy, (float)center->vz}, translated;
+    HD_TEXTURE texture = {tex->page, tex->clut, tex->u, tex->v, 32, 32, HD_TEXTURED | HD_FILTERED};
+    float c = cosf(spin) * radius, s = sinf(spin) * radius;
+    uint32 face, point, segment;
+    if (!hd_capture_active())
+        return;
+    hd_wheel_begin(wheel, center, steering, spin, spin_period);
+    IdentityMatrixf(&turn);
+    RotMatrixYf(steering, &turn);
+    MulMatrix0f(&base, &turn, &transform);
+    RotTransf(&base, &local_center, &translated);
+    transform.t[0] = translated.vx;
+    transform.t[1] = translated.vy;
+    transform.t[2] = translated.vz;
+    for (segment = 0; segment < 8; ++segment)
+    {
+        HD_TEXTURE solid = {0};
+        RGBC black = {.rgbc = 0x28000000};
+        RGBC colors[4] = {black, black, black, black};
+        VECTORF vertices[4];
+        for (point = 0; point < 4; ++point)
+        {
+            const SVECTOR *source = &side_vertices[slot][segment * 2 + point].sdk;
+            VECTORF local = {(float)source->vx, (float)source->vy, (float)source->vz};
+            RotTransf(&transform, &local, &vertices[point]);
+        }
+        hd_solid_quad(vertices, &solid, colors, 1);
+    }
+    hd_wheel_hub();
+    for (face = 0; face < 2; ++face)
+    {
+        VECTORF vertices[4], local[4];
+        RGBC color = {.rgbc = light_rgbc}, colors[4];
+        float side = (wheel & 1) != 0 ? width : -width;
+        float determinant;
+        if (face != 0)
+            side = -side;
+        for (point = 0; point < 4; ++point)
+            local[point].vx = side;
+        local[0].vy = s;
+        local[0].vz = c;
+        local[1].vy = (wheel & 1) != 0 ? -c : c;
+        local[1].vz = (wheel & 1) != 0 ? s : -s;
+        local[2].vy = (wheel & 1) != 0 ? c : -c;
+        local[2].vz = (wheel & 1) != 0 ? -s : s;
+        local[3].vy = -s;
+        local[3].vz = -c;
+        for (point = 0; point < 4; ++point)
+            RotTransf(&transform, &local[point], &vertices[point]);
+        determinant = vertices[0].vx * (vertices[1].vy * vertices[2].vz - vertices[1].vz * vertices[2].vy) + vertices[0].vy * (vertices[1].vz * vertices[2].vx - vertices[1].vx * vertices[2].vz) + vertices[0].vz * (vertices[1].vx * vertices[2].vy - vertices[1].vy * vertices[2].vx);
+        if (face != 0 && determinant <= 0.0f)
+            continue;
+        if (face == 0)
+        {
+            if (determinant >= 0.0f)
+                color.rgbc = 0x2C000000;
+        }
+        else
+            color = wheel_packets[disp_state.bank][slot * 8 + wheel * 2 + 1].rgbc;
+        for (point = 0; point < 4; ++point)
+            colors[point] = color;
+        if (face == 0 && determinant < 0.0f)
+            hd_lit_wheel_quad(vertices, &texture, colors, &light_n[wheel].sdk);
+        else
+            hd_solid_quad(vertices, &texture, colors, 1);
+    }
+    hd_wheel_end();
+}
+
+static void draw_hd_race_wheel(uint32 slot, uint32 wheel)
+{
+    const CAR_STATE *car;
+    const WHEEL_TEXTURE *texture;
+    sint32 speed, spin;
+    if (!hd_capture_active())
+        return;
+    XASSERT(slot < 6 && wheel < 4);
+    car = &car_states[slot];
+    speed = (sint32)(wheel < 2 ? car->forward_speed : car->steered_speed) >> 8;
+    if (speed < 0)
+        speed = -speed;
+    speed /= 64;
+    texture = wheel_tex + (speed < 4 ? speed + 4 : 7);
+    if (slot != 0)
+        texture -= 4;
+    spin = -4 * (sint16)car->wheel_rotation[wheel < 2 ? 1 : 0];
+    draw_hd_wheel(slot, wheel, &car->suspension_local[(wheel + 2) & 3], wheel >= 2 ? (sint32)car->steering_angle / 256.0f * RAD12 : 0.0f, spin * RAD12, (float)(sint16)car_geometry_metrics[slot].wheel_radius, (float)(sint16)car_geometry_metrics[slot].wheel_width, texture, 262144.0f * RAD12);
+}
+
+void wheels_draw_hd_race(uint32 slot)
+{
+    uint32 wheel;
+    if (!hd_capture_active())
+        return;
+    XASSERT(slot < 6);
+    for (wheel = 0; wheel < 4; ++wheel)
+        draw_hd_race_wheel(slot, wheel);
+}
+
 uint32 wheels_init_race(void)
 {
     const uint8 *standard;
@@ -61,9 +164,9 @@ uint32 wheels_init_race(void)
     {
         tex = idx < 4 ? standard : race;
         rec = wheel_tex + idx;
-        val = xport_load_le16(tex + 8);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->page;
         rec->page = (uint16)(val);
-        val = xport_load_le16(tex + 10);
+        val = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
         rec->clut = (uint16)(val);
         val = tex[14];
         rec->u = (uint8)(val + ((idx & 1) != 0 ? 32 : 0));
@@ -101,8 +204,8 @@ uint32 wheels_init_preview(void)
     for (idx = 0; idx < 4; ++idx)
     {
         dst = wheel_tex + idx;
-        dst->page = (uint16)(xport_load_le16(tex + 8));
-        dst->clut = (uint16)(xport_load_le16(tex + 10));
+        dst->page = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->page);
+        dst->clut = (uint16)(((const TEXTURE_DESCRIPTOR *)tex)->clut);
         val = tex[14];
         if (idx & 1)
             val += 32;
@@ -262,6 +365,7 @@ uint32 wheels_draw_race(uint32 slot)
         tex = speed < 4 ? wheel_tex + (uint32)(speed + 4) : wheel_tex + 7;
         if (slot != 0)
             tex -= 4;
+        draw_hd_race_wheel(slot, wheel);
         for (face = 0; face < 2; ++face)
         {
             if (face != 0)
@@ -368,6 +472,8 @@ uint32 wheels_draw_race(uint32 slot)
 
 uint32 wheels_draw_preview(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     uint32 wire_word_2, wire_word_3;
     const CAR_SELECTION_BUFFER *asset;
     const uint8 *model;
@@ -393,8 +499,8 @@ uint32 wheels_draw_preview(void)
     memcpy(&model_offset, model + 0x54, sizeof(model_offset));
     XASSERT(!(model_offset > asset->capacity || asset->capacity - model_offset < 134));
     model = asset->bytes + model_offset;
-    radius = (sint16)xport_load_le16(model + 0x82);
-    side = (sint16)xport_load_le16(model + 0x84);
+    radius = (sint16)(memcpy(&wire_halfword_1, model + 0x82, sizeof(wire_halfword_1)), wire_halfword_1);
+    side = (sint16)(memcpy(&wire_halfword_2, model + 0x84, sizeof(wire_halfword_2)), wire_halfword_2);
     points = model + 0x40;
     product = (uint32)rcos((sint32)(angle << 2)) * (uint32)radius;
     angle = car_selection.wheel_angles[0];
@@ -466,6 +572,12 @@ uint32 wheels_draw_preview(void)
         vertices[3].vz = (sint16)(uint16)(0 - x);
         packet = &wheel_packets[disp_state.bank][wheel * 2];
         preview_set_uv(packet);
+        if (hd_capture_active())
+        {
+            SVECTOR center;
+            memcpy(&center, points + ((wheel + 2) & 3) * sizeof(center), sizeof(center));
+            draw_hd_wheel(0, wheel, &center, 0.0f, (((car_selection.wheel_angles[half] + 32) << 2) & 4095) * RAD12, (float)radius, (float)side, &wheel_tex[0], 4096.0f * RAD12);
+        }
         if (preview_project(packet, vertices, &proj_area[0], &proj_depth[0]) != 0)
         {
             area = proj_area[0];

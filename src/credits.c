@@ -284,12 +284,12 @@ static void upload_credit_image(uint32 idx)
     // Exclude the allocation reserve from the TIM payload
     unpacked -= 1024;
     tex = credits.tex;
-    page = xport_load_le16(tex + 8);
+    page = ((const TEXTURE_DESCRIPTOR *)tex)->page;
     val = tex[14];
     image_x = ((page << 6) & 0x3FF) + (val >> 1);
     image_y = ((page << 4) & 0x100) + ((page >> 2) & 0x200);
     val = tex[15];
-    clut = xport_load_le16(tex + 10);
+    clut = ((const TEXTURE_DESCRIPTOR *)tex)->clut;
     image_y |= val;
     pal_y = (clut >> 6) & 0xFF;
     pal_x = (clut & 0x3F) << 4;

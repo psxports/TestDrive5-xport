@@ -187,6 +187,8 @@ static uint32 attach_car(CAR_STATE *car, uint32 view)
 
 static uint32 trackside_target_height(CAR_STATE *car, uint32 view)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     VECTOR target;
     uint32 offset = view * 4;
     VECTOR *camera = &camera_views[view].eye;
@@ -200,12 +202,12 @@ static uint32 trackside_target_height(CAR_STATE *car, uint32 view)
     idx = camera_views[offset / 4].trackside_vertex;
     XASSERT(!(rec_idx >= track_geometry.node_count));
     rec = pool + rec_idx * 24;
-    base_vertex = xport_load_le16(rec + 4);
+    base_vertex = (memcpy(&wire_halfword_1, rec + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     XASSERT(!(base_vertex >= track_geometry.vertex_count || idx >= track_geometry.vertex_count - base_vertex));
     val = camera_views[offset / 4].trackside_x;
     vertices = track_geometry.vertex_bytes;
     camera->vx = (sint32)(val);
-    val = (sint16)xport_load_le16(vertices + base_vertex * 6 + idx * 6 + 2);
+    val = (sint16)(memcpy(&wire_halfword_2, vertices + base_vertex * 6 + idx * 6 + 2, sizeof(wire_halfword_2)), wire_halfword_2);
     memcpy(&other, rec + 16, sizeof(other));
     height = camera_views[offset / 4].trackside_height;
     camera->vy = (sint32)((other + val + height) << 8);
@@ -225,6 +227,9 @@ static uint32 trackside_target_height(CAR_STATE *car, uint32 view)
 
 static uint32 spline(CAR_STATE *car, uint32 view, uint32 offset)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     uint32 samples[12];
     VECTOR target;
     uint32 stride = view * 4;
@@ -255,19 +260,19 @@ static uint32 spline(CAR_STATE *car, uint32 view, uint32 offset)
         idx = camera_views[stride / 4].cue_vertex + a;
         XASSERT(!(other + val >= track_geometry.node_count));
         rec = records + (other + val) * 24;
-        base_vertex = xport_load_le16(rec + 4);
+        base_vertex = (memcpy(&wire_halfword_1, rec + 4, sizeof(wire_halfword_1)), wire_halfword_1);
         XASSERT(!(base_vertex + idx >= track_geometry.vertex_count));
-        val = (sint16)xport_load_le16(vertices + (base_vertex + idx) * 6);
+        val = (sint16)(memcpy(&wire_halfword_2, vertices + (base_vertex + idx) * 6, sizeof(wire_halfword_2)), wire_halfword_2);
         memcpy(&other, rec + 12, sizeof(other));
         output = samples + i * 3;
         output[0] = (val + other) << 8;
-        base_vertex = xport_load_le16(rec + 4);
-        val = (sint16)xport_load_le16(vertices + (base_vertex + idx) * 6 + 4);
+        base_vertex = (memcpy(&wire_halfword_3, rec + 4, sizeof(wire_halfword_3)), wire_halfword_3);
+        val = (sint16)(memcpy(&wire_halfword_4, vertices + (base_vertex + idx) * 6 + 4, sizeof(wire_halfword_4)), wire_halfword_4);
         memcpy(&other, rec + 20, sizeof(other));
         output[2] = (val + other) << 8;
-        base_vertex = xport_load_le16(rec + 4);
+        base_vertex = (memcpy(&wire_halfword_5, rec + 4, sizeof(wire_halfword_5)), wire_halfword_5);
         ++table;
-        val = (sint16)xport_load_le16(vertices + (base_vertex + idx) * 6 + 2);
+        val = (sint16)(memcpy(&wire_halfword_6, vertices + (base_vertex + idx) * 6 + 2, sizeof(wire_halfword_6)), wire_halfword_6);
         memcpy(&other, rec + 16, sizeof(other));
         a = camera_views[stride / 4].trackside_height;
         output[1] = (val + other + a) << 8;
@@ -346,6 +351,8 @@ static uint32 attach_view(CAR_STATE *car, uint32 view)
 
 static uint32 trackside_zoom(CAR_STATE *car, uint32 view)
 {
+    uint16 wire_halfword_1, wire_halfword_2;
+
     VECTOR target;
     uint32 offset = view * 4;
     VECTOR *camera = &camera_views[view].eye;
@@ -360,12 +367,12 @@ static uint32 trackside_zoom(CAR_STATE *car, uint32 view)
     idx = camera_views[offset / 4].trackside_vertex;
     XASSERT(!(rec_idx >= track_geometry.node_count));
     rec = pool + rec_idx * 24;
-    base_vertex = xport_load_le16(rec + 4);
+    base_vertex = (memcpy(&wire_halfword_1, rec + 4, sizeof(wire_halfword_1)), wire_halfword_1);
     XASSERT(!(base_vertex >= track_geometry.vertex_count || idx >= track_geometry.vertex_count - base_vertex));
     x = camera_views[offset / 4].trackside_x;
     vertices = track_geometry.vertex_bytes;
     camera->vx = (sint32)(x);
-    val = (sint16)xport_load_le16(vertices + (base_vertex + idx) * 6 + 2);
+    val = (sint16)(memcpy(&wire_halfword_2, vertices + (base_vertex + idx) * 6 + 2, sizeof(wire_halfword_2)), wire_halfword_2);
     memcpy(&other, rec + 16, sizeof(other));
     x = camera_views[offset / 4].trackside_height;
     camera->vy = (sint32)((other + val + x) << 8);
@@ -623,6 +630,9 @@ static uint32 update_cue(CAR_STATE *car, uint32 view)
 
 static uint32 select_cue(CAR_STATE *car, uint32 view)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6;
+
     uint32 offset = view * 4, prev, sel, idx;
     const CAMERA_CUE *table, *cursor;
     const uint8 *rec, *vertices;
@@ -670,7 +680,7 @@ static uint32 select_cue(CAR_STATE *car, uint32 view)
         else
         {
             rec = track_geometry.node_bytes + val1 * 24;
-            val0 = xport_load_le16(rec + 4);
+            val0 = (memcpy(&wire_halfword_1, rec + 4, sizeof(wire_halfword_1)), wire_halfword_1);
             if (val0 + point >= track_geometry.vertex_count)
                 kind = 10;
         }
@@ -685,7 +695,7 @@ static uint32 select_cue(CAR_STATE *car, uint32 view)
                     kind = 10;
                     break;
                 }
-                sample_vertex = xport_load_le16(track_geometry.node_bytes + sample_node * 24 + 4) + point + (uint32)spline_samples[cursor->spline_variant][sample].vertex_offset;
+                sample_vertex = (memcpy(&wire_halfword_2, track_geometry.node_bytes + sample_node * 24 + 4, sizeof(wire_halfword_2)), wire_halfword_2) + point + (uint32)spline_samples[cursor->spline_variant][sample].vertex_offset;
                 if (sample_vertex >= track_geometry.vertex_count)
                 {
                     kind = 10;
@@ -696,13 +706,13 @@ static uint32 select_cue(CAR_STATE *car, uint32 view)
         if (kind != 10)
         {
             rec = track_geometry.node_bytes + val1 * 24;
-            val0 = xport_load_le16(rec + 4);
+            val0 = (memcpy(&wire_halfword_3, rec + 4, sizeof(wire_halfword_3)), wire_halfword_3);
             vertices = track_geometry.vertex_bytes;
-            val = (sint16)xport_load_le16(vertices + (val0 + point) * 6);
+            val = (sint16)(memcpy(&wire_halfword_4, vertices + (val0 + point) * 6, sizeof(wire_halfword_4)), wire_halfword_4);
             memcpy(&other, rec + 12, sizeof(other));
             camera_views[offset / 4].trackside_x = (val + other) << 8;
-            val0 = xport_load_le16(rec + 4);
-            val = (sint16)xport_load_le16(vertices + (val0 + point) * 6 + 4);
+            val0 = (memcpy(&wire_halfword_5, rec + 4, sizeof(wire_halfword_5)), wire_halfword_5);
+            val = (sint16)(memcpy(&wire_halfword_6, vertices + (val0 + point) * 6 + 4, sizeof(wire_halfword_6)), wire_halfword_6);
             memcpy(&other, rec + 20, sizeof(other));
             camera_views[offset / 4].trackside_z = (val + other) << 8;
         }
@@ -775,6 +785,11 @@ static uint32 select_cue(CAR_STATE *car, uint32 view)
 
 uint32 camera_init_cues(void)
 {
+    uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;
+    uint16 wire_halfword_5, wire_halfword_6, wire_halfword_7, wire_halfword_8;
+    uint16 wire_halfword_9, wire_halfword_10, wire_halfword_11, wire_halfword_12;
+    uint16 wire_halfword_13;
+
     const SCENE_LEVEL_IMAGE *image = &scene_level_image;
     const uint8 *wire;
     CAMERA_CUE *decoded;
@@ -805,7 +820,7 @@ uint32 camera_init_cues(void)
     {
         XASSERT(!(cursor > image->size - 2));
         wire = image->bytes + cursor;
-        sentinel = xport_load_le16(wire);
+        sentinel = (memcpy(&wire_halfword_1, wire, sizeof(wire_halfword_1)), wire_halfword_1);
         if (sentinel == 0xFFFF)
             break;
         XASSERT(!(cursor > image->size - 16));
@@ -819,14 +834,14 @@ uint32 camera_init_cues(void)
     for (cursor = 0; cursor < decode_count; ++cursor)
     {
         wire = image->bytes + cue_offset + cursor * 16;
-        decoded[cursor].kind = xport_load_le16(wire);
-        decoded[cursor].node_start = xport_load_le16(wire + 2);
-        decoded[cursor].node_end = xport_load_le16(wire + 4);
-        decoded[cursor].node = xport_load_le16(wire + 6);
-        decoded[cursor].vertex = xport_load_le16(wire + 8);
-        decoded[cursor].height = xport_load_le16(wire + 10);
-        decoded[cursor].spline_variant = xport_load_le16(wire + 12);
-        decoded[cursor].spline_step = xport_load_le16(wire + 14);
+        decoded[cursor].kind = (memcpy(&wire_halfword_2, wire, sizeof(wire_halfword_2)), wire_halfword_2);
+        decoded[cursor].node_start = (memcpy(&wire_halfword_3, wire + 2, sizeof(wire_halfword_3)), wire_halfword_3);
+        decoded[cursor].node_end = (memcpy(&wire_halfword_4, wire + 4, sizeof(wire_halfword_4)), wire_halfword_4);
+        decoded[cursor].node = (memcpy(&wire_halfword_5, wire + 6, sizeof(wire_halfword_5)), wire_halfword_5);
+        decoded[cursor].vertex = (memcpy(&wire_halfword_6, wire + 8, sizeof(wire_halfword_6)), wire_halfword_6);
+        decoded[cursor].height = (memcpy(&wire_halfword_7, wire + 10, sizeof(wire_halfword_7)), wire_halfword_7);
+        decoded[cursor].spline_variant = (memcpy(&wire_halfword_8, wire + 12, sizeof(wire_halfword_8)), wire_halfword_8);
+        decoded[cursor].spline_step = (memcpy(&wire_halfword_9, wire + 14, sizeof(wire_halfword_9)), wire_halfword_9);
         XASSERT(!(decoded[cursor].kind == 6 && decoded[cursor].spline_variant >= 5));
     }
     free(camera_cues);
@@ -842,17 +857,17 @@ uint32 camera_init_cues(void)
     camera_views[0].cue_vertex = offset;
     camera_views[1].track_node = node;
     camera_views[0].track_node = node;
-    vertex = xport_load_le16(track + 4);
+    vertex = (memcpy(&wire_halfword_10, track + 4, sizeof(wire_halfword_10)), wire_halfword_10);
     base = track_geometry.vertex_bytes;
     XASSERT(!(vertex + offset >= track_geometry.vertex_count));
-    val = (sint16)xport_load_le16(base + (vertex + offset) * 6);
+    val = (sint16)(memcpy(&wire_halfword_11, base + (vertex + offset) * 6, sizeof(wire_halfword_11)), wire_halfword_11);
     memcpy(&other, track + 12, sizeof(other));
     val = (val + other) << 8;
     camera_views[1].trackside_x = val;
     camera_views[0].trackside_x = val;
-    vertex = xport_load_le16(track + 4);
+    vertex = (memcpy(&wire_halfword_12, track + 4, sizeof(wire_halfword_12)), wire_halfword_12);
     XASSERT(!(vertex + offset >= track_geometry.vertex_count));
-    val = (sint16)xport_load_le16(base + (vertex + offset) * 6 + 4);
+    val = (sint16)(memcpy(&wire_halfword_13, base + (vertex + offset) * 6 + 4, sizeof(wire_halfword_13)), wire_halfword_13);
     memcpy(&other, track + 20, sizeof(other));
     val = (val + other) << 8;
     camera_views[1].trackside_z = val;
@@ -891,6 +906,7 @@ uint32 camera_reset_follow(const SVECTOR *angles, sint32 mode, uint32 view)
     uint32 reset;
 
     FUNCTION_MARKER(0x8001E034, "SLUS_006.10");
+    hd_camera_reset(view);
     entry = *sel * 16;
     val = (uint32)camera_presets[entry / 16].height << 8;
     camera_views[offset / 4].target_height = val;
@@ -987,7 +1003,10 @@ uint32 camera_update(CAR_STATE *car, uint32 view)
     }
     buttons = input_ports[view].held;
     mask = input_ports[view].config.camera_held;
-    camera_views[offset / 4].look_back_angle = (buttons & mask) != 0 ? 2048 : 0;
+    val = (buttons & mask) != 0 ? 2048 : 0;
+    if (camera_views[offset / 4].look_back_angle != val)
+        hd_camera_reset(view);
+    camera_views[offset / 4].look_back_angle = val;
     buttons = input_ports[view].pressed;
     mask = input_ports[view].config.camera_cycle;
     if ((buttons & mask) != 0)

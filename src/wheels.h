@@ -13,5 +13,6 @@ void wheels_draw_hd_race(uint32 slot);
 uint32 wheels_draw_preview(void);
 
 uint32 wheels_init_sides(uint32 slot, sint32 wheel_radius, sint32 wheel_width);
+void wheels_hd_shadow_sides(uint32 slot, SVECTOR vertices[18]);
 
 #endif

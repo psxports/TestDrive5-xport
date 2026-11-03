@@ -1795,7 +1795,23 @@ uint32 hud_link_race_text(uint32 prev_result)
         head.tags = cur_frame->ordering;
         head.byte_offset = 0;
         head_tag = head.tags[(sint32)head.byte_offset / 4];
-        hd_ui_flat(poly->p, &poly->rgbc, 0);
+        if (hd_capture_active())
+        {
+            HD_UI_VERTEX vertices[4];
+            HD_TEXTURE texture = hd_quad_texture(poly->p, &poly->rgbc);
+            texture.width = 8;
+            texture.height = race_session.two_players ? 8 : 16;
+            for (uint32 point = 0; point < 4; ++point)
+            {
+                // include the eighth column without changing the OG packet or glyph advance
+                vertices[point].x = poly->p[point].xy.x + ((point & 1) && !race_session.two_players ? 1.0f : 0.0f);
+                vertices[point].y = (float)poly->p[point].xy.y;
+                vertices[point].u = texture.u + ((point & 1) ? (float)texture.width : 0.0f);
+                vertices[point].v = texture.v + ((point & 2) ? (float)texture.height : 0.0f);
+                memcpy(vertices[point].color, &poly->rgbc, sizeof(poly->rgbc));
+            }
+            hd_ui_ordered_quad(vertices, &texture, 1.0f, 0);
+        }
         head.tags[(sint32)head.byte_offset / 4] = (head_tag & 0xFF000000) | gpu_packet_link((uintptr_t)poly);
         buffer += 2;
     }

@@ -694,6 +694,13 @@ uint32 wheels_init_sides(uint32 slot, sint32 wheel_radius, sint32 wheel_width)
     return 0;
 }
 
+void wheels_hd_shadow_sides(uint32 slot, SVECTOR vertices[18])
+{
+    XASSERT(slot < 6);
+    for (uint32 point = 0; point < 18; ++point)
+        vertices[point] = side_vertices[slot][point].sdk;
+}
+
 static uint32 draw_sides(uint32 slot, uint32 wheel)
 {
     DISPLAY_ORDERING bucket, ordering;

@@ -592,7 +592,7 @@ typedef struct HD_MODEL_DRAW
     HD_MODEL *model;
     HD_TRACK_IMAGE *image;
     uint8 region_sampling, batch_phases;
-    uint8 texture_transparent;
+    uint8 texture_transparent, probe_only;
     uint8 fog_active;
     uint8 fog_color[3];
     float fog_horizon;
@@ -672,7 +672,7 @@ static HD_STATIC_POOL *static_pools;
 static uint64 static_pool_generation;
 static uint64 static_dispatch_serial;
 static void static_pools_free(void);
-static void prepare_environment_shadow(void);
+static void prepare_environment_shadow(uint32 views);
 
 typedef struct HD_BATCH_INPUT
 {
@@ -718,7 +718,7 @@ typedef struct HD_SCENE_BATCH_BANK
     uint32 membership_pass, membership_phase, membership_billboard;
 } HD_SCENE_BATCH_BANK;
 
-static HD_SCENE_BATCH_BANK *scene_batch_banks[2], **scene_batch_cursor;
+static HD_SCENE_BATCH_BANK *scene_batch_banks[1 + HD_VIEWS], **scene_batch_cursor;
 static struct
 {
     VID_TEXTURE *texture;
@@ -944,12 +944,12 @@ static void set_color_pass(uint32 kind, const HD_POSE *camera, const MATRIXF *ro
 
 static struct
 {
-    VID_TARGET *target;
+    VID_TARGET *target[HD_VIEWS];
     VID_SHADER *shader;
-    VID_MATERIAL *material;
+    VID_MATERIAL *material[HD_VIEWS];
     HD_POSE camera;
-    uint64 serial, captures;
-    uint32 ready, faces;
+    uint64 serial[HD_VIEWS], captures;
+    uint32 ready[HD_VIEWS], faces, view;
     uint64 presentation;
     float reflection_strength;
     HD_CUBE_COMMAND *commands;
@@ -994,8 +994,12 @@ static void update_planar_surfaces(void);
 
 static sint32 cube_excludes(const HD_MODEL_DRAW *draw)
 {
-    const CAR_STATE *car = &car_states[race_view.primary_car];
-    return draw->view != 0 || (draw->kind != HD_COMMAND_MODEL && draw->model->visibility == NULL) || draw->model->source == car->render_models[0].bytes || draw->model->source == car->render_models[1].bytes;
+    uint32 slot = hd.views == 2 ? player_cube.view : race_view.primary_car;
+    uint32 source_view = hd.views == 2 && draw->car_slot >= 0 && draw->car_slot < 2 ? (uint32)draw->car_slot : player_cube.view;
+    if (draw->view != source_view || draw->car_slot == (sint32)slot)
+        return 1;
+    return draw->model->visibility == NULL && draw->kind != HD_COMMAND_MODEL &&
+        !(draw->kind == HD_COMMAND_SOLID && draw->car_slot >= 0);
 }
 
 enum
@@ -1015,7 +1019,7 @@ typedef struct HD_CAR_SHADOW
     uint32 index_count, reference;
     float center[3];
     sint32 view;
-    uint32 active;
+    uint32 active, pose_view;
     uint64 presentation;
     HD_POSE pose, inputs[2];
     MATRIXF world[HD_SHADOW_TRANSFORMS];
@@ -3023,9 +3027,12 @@ void hd_reset(void)
     free(environment_shadow.pools);
     memset(&environment_shadow, 0, sizeof(environment_shadow));
     free(player_cube.commands);
-    vid_mat_free(player_cube.material);
+    for (uint32 view = 0; view < HD_VIEWS; ++view)
+    {
+        vid_mat_free(player_cube.material[view]);
+        vid_target_free(player_cube.target[view]);
+    }
     vid_shader_free(player_cube.shader);
-    vid_target_free(player_cube.target);
     memset(&player_cube, 0, sizeof(player_cube));
     hd_suspend();
     scene_batches_free();
@@ -4891,7 +4898,7 @@ static void prepare_billboard_shadow_pool(HD_MODEL *const *models, uint32 count,
         }
     if (vertex_count == 0)
         return;
-    prepare_environment_shadow();
+    prepare_environment_shadow(race_session.two_players ? 2 : 1);
     HD_STATIC_POOL *pool = calloc(1, sizeof(*pool));
     XASSERT(pool != NULL);
     pool->billboard = 1;
@@ -5042,7 +5049,7 @@ void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, u
     }
     if (total_vertices == 0)
         return;
-    prepare_environment_shadow();
+    prepare_environment_shadow(race_session.two_players ? 2 : 1);
     pool = (HD_STATIC_POOL *)calloc(1, sizeof(*pool));
     XASSERT(pool != NULL);
     pool->track_section = section;
@@ -5276,11 +5283,11 @@ void hd_draw_model(const MODEL_RESOURCE *resource)
 {
     if (original_track_suppressed)
         return;
-    if (hd_capture_active() && hd.collecting && hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT && ((uint32)hd.actor != race_view.primary_car || (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0))
+    if (hd_capture_active() && hd.collecting && hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT && (hd.views == 2 || (uint32)hd.actor != race_view.primary_car || (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0))
     {
         const CAR_STATE *car = &car_states[hd.actor];
         if ((resource->bytes == car->render_models[0].bytes || resource->bytes == car->render_models[1].bytes))
-            car_environment_candidate(high_detail_car_resource(resource), &car_states[race_view.primary_car]);
+            car_environment_candidate(high_detail_car_resource(resource), hd.views == 2 && hd.actor < 2 ? car : &car_states[race_view.primary_car]);
     }
     draw_model(resource, NULL);
 }
@@ -5737,7 +5744,7 @@ void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *resource, HD_CAR_F
             hd.light_override = &field;
         }
         if (family != HD_CAR_TRAFFIC)
-            car_environment_candidate(resource, family == HD_CAR_PRIMARY ? car : &car_states[race_view.primary_car]);
+            car_environment_candidate(resource, family == HD_CAR_PRIMARY || (family == HD_CAR_SPLIT && slot < 2) ? car : &car_states[race_view.primary_car]);
         draw_model(resource, NULL);
         if (family == HD_CAR_RACING || (family == HD_CAR_SPLIT && race_session.multiplayer_mode == 3 && slot != chase_state.pursuer_slot))
             chase_draw_hd_health(slot);
@@ -5750,6 +5757,42 @@ void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *resource, HD_CAR_F
             wheels_draw_hd_race(slot);
         car_draw_hd_shadow(slot, car->motion_mode != 0 ? 2 : family == HD_CAR_TRAFFIC ? 1 : 0);
     }
+    hd.transform = saved_transform;
+    hd.light = saved_light;
+    hd.object_pose = saved_pose;
+    hd.object_relative = saved_relative;
+    hd.light_override = saved_override;
+    memcpy(hd.ambient, saved_ambient, sizeof(hd.ambient));
+}
+
+void hd_draw_car_probe(uint32 slot, const MODEL_RESOURCE *resource)
+{
+    if (!hd_capture_active() || !hd.collecting || !hd.race_frame || hd.views != 2)
+        return;
+    XASSERT(slot < 2 && hd.actor == (sint32)slot && hd.view == slot);
+    const CAR_STATE *car = &car_states[slot];
+    MATRIXF saved_transform = hd.transform, saved_light = hd.light;
+    HD_POSE saved_pose = hd.object_pose;
+    sint32 saved_relative = hd.object_relative;
+    const HD_LIGHT_SAMPLE *saved_override = hd.light_override;
+    float saved_ambient[3];
+    memcpy(saved_ambient, hd.ambient, sizeof(saved_ambient));
+    hd_transform_model(&car->transform, &car->pos, 0);
+    HD_LIGHT_SAMPLE field;
+    if (car_lighting_field(car, &field))
+    {
+        MATRIXF rotation;
+        matrix_from_native(&car->transform, &rotation);
+        MulMatrix0f(&field.world, &rotation, &hd.light);
+        memcpy(hd.ambient, field.ambient, sizeof(hd.ambient));
+        hd.light_override = &field;
+    }
+    uint32 first = hd.model_count;
+    // retain the hidden body for other cars' probes without changing the main view
+    draw_model(resource, NULL);
+    wheels_draw_hd_race(slot);
+    for (uint32 index = first; index < hd.model_count; ++index)
+        hd.model_draws[index].probe_only = 1;
     hd.transform = saved_transform;
     hd.light = saved_light;
     hd.object_pose = saved_pose;
@@ -7160,7 +7203,7 @@ static void common_uniforms(const HD_MODEL_DRAW *draw, float uniforms[HD_U_COUNT
     if (!(color_pass.kind == HD_PASS_PLANAR) && !(color_pass.kind == HD_PASS_CUBE) && planar.ready[draw->view] && (hd.race_frame || hd.paused)) flags |= 32u;
     HD_COMMON_UNIFORMS *entry = &cache[color_pass.kind][draw->view][flags];
     const HD_POSE *source = color_pass.camera ? NULL : draw->instance->poses.camera;
-    uint32 face = color_pass.kind == HD_PASS_CUBE ? player_cube.faces + 1 : 0;
+    uint32 face = color_pass.kind == HD_PASS_CUBE ? player_cube.view * 6 + player_cube.faces + 1 : 0;
     if (entry->serial != player_cube.presentation || entry->generation != hd.motion_generation ||
         entry->source != source || entry->face != face || entry->phase != hd.render_phase)
     {
@@ -7202,7 +7245,7 @@ static void common_uniforms(const HD_MODEL_DRAW *draw, float uniforms[HD_U_COUNT
     }
     if ((flags & 4u) != 0)
     {
-        uint32 shadow_view = (color_pass.kind == HD_PASS_CUBE) ? 0 : draw->view;
+        uint32 shadow_view = (color_pass.kind == HD_PASS_CUBE) ? player_cube.view : draw->view;
         uniforms[HD_U_SHADOW_COUNTS][1] = (float)(shadow_view * HD_ENV_SHADOW_CASCADES);
         uniforms[HD_U_SHADOW_COUNTS][2] = environment_shadow.extent[shadow_view][0] / environment_shadow.extent[shadow_view][1];
         uniforms[HD_U_SUN_AMBIENT][3] = environment_shadow.depth[shadow_view][0] / environment_shadow.depth[shadow_view][1] * ((color_pass.kind == HD_PASS_CUBE) || (color_pass.kind == HD_PASS_PLANAR) ? -1.0f : 1.0f);
@@ -7279,6 +7322,8 @@ static void common_uniforms(const HD_MODEL_DRAW *draw, float uniforms[HD_U_COUNT
 
 static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE_BATCH_GROUP *batch)
 {
+    if (draw->probe_only && color_pass.kind != HD_PASS_CUBE)
+        return;
     if (draw->kind == HD_COMMAND_SOLID && draw->instance->poses.wheel_active && draw->count == 0)
         return;
     if ((color_pass.kind == HD_PASS_PLANAR) && planar_excludes(draw))
@@ -7493,7 +7538,8 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         memcpy(uniforms[HD_U_OBLIQUE], planar.oblique, sizeof(planar.oblique));
     if ((color_pass.kind == HD_PASS_PLANAR) && draw->model->visibility != NULL)
         uniforms[HD_U_SKY][0] = 1.0f;
-    if (!(color_pass.kind == HD_PASS_CUBE) && player_cube.ready && draw->kind == HD_COMMAND_REFLECTION && draw->car_slot >= 0 && draw->car_slot < CAR_RACE_MODEL_COUNT)
+    uint32 cube_view = hd.views == 2 && draw->car_slot >= 0 && draw->car_slot < 2 ? (uint32)draw->car_slot : draw->view;
+    if (color_pass.kind != HD_PASS_CUBE && cube_view < hd.views && player_cube.ready[cube_view] && draw->kind == HD_COMMAND_REFLECTION && draw->car_slot >= 0 && draw->car_slot < CAR_RACE_MODEL_COUNT)
     {
         HD_POSE camera;
         MATRIXF rotation;
@@ -7504,7 +7550,7 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
                 uniforms[HD_U_PREV_COLOR0 + row][column] = rotation.m[column][row];
         uniforms[HD_U_ENV_MODE][1] = player_cube.reflection_strength;
         vid_uniforms(&uniforms[HD_U_OBJECT0][0], 72);
-        bind_scene_material(player_cube.material);
+        bind_scene_material(player_cube.material[cube_view]);
         vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         return;
     }
@@ -7659,7 +7705,7 @@ static void scene_batch_bank_free(HD_SCENE_BATCH_BANK **head)
 
 static void scene_batches_free(void)
 {
-    for (uint32 pass = 0; pass < 2; ++pass) scene_batch_bank_free(&scene_batch_banks[pass]);
+    for (uint32 pass = 0; pass < 1 + HD_VIEWS; ++pass) scene_batch_bank_free(&scene_batch_banks[pass]);
     for (uint32 view = 0; view < HD_VIEWS; ++view)
         scene_batch_bank_free(&planar.banks[view]);
     scene_batch_cursor = NULL;
@@ -7800,7 +7846,7 @@ static void prepare_submit_lists(void)
 
 static sint32 scene_batch_eligible(const HD_MODEL_DRAW *draw, uint32 phase)
 {
-    return (draw->batch_phases & (1u << phase)) != 0 &&
+    return (draw->batch_phases & (1u << phase)) != 0 && (!draw->probe_only || color_pass.kind == HD_PASS_CUBE) &&
         (!(color_pass.kind == HD_PASS_PLANAR) || !planar_excludes(draw)) && (!(color_pass.kind == HD_PASS_CUBE) || !cube_excludes(draw));
 }
 
@@ -7899,9 +7945,13 @@ static void prepare_billboard_instances(void)
 // share only identical current membership; pass visibility remains independently owned
 static sint32 share_batch_geometry(HD_SCENE_BATCH_BANK *bank, uint32 phase, sint32 billboard)
 {
-    HD_SCENE_BATCH_BANK *heads[2 + HD_VIEWS] = {scene_batch_banks[0], scene_batch_banks[1]};
-    for (uint32 view = 0; view < HD_VIEWS; ++view) heads[2 + view] = planar.banks[view];
-    for (uint32 owner = 0; owner < 2 + HD_VIEWS; ++owner)
+    HD_SCENE_BATCH_BANK *heads[1 + 2 * HD_VIEWS] = {scene_batch_banks[0]};
+    for (uint32 view = 0; view < HD_VIEWS; ++view)
+    {
+        heads[1 + view] = scene_batch_banks[1 + view];
+        heads[1 + HD_VIEWS + view] = planar.banks[view];
+    }
+    for (uint32 owner = 0; owner < 1 + 2 * HD_VIEWS; ++owner)
         for (HD_SCENE_BATCH_BANK *other = heads[owner]; other; other = other->next)
         {
             if (other == bank || !other->storage || other->membership_serial != submit_lists.serial ||
@@ -8950,7 +9000,7 @@ static void capture_resolved_world(void)
     capture_planar_reflections();
     if (hd_post_world_begin(width, height, hd.clear))
     {
-        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE ? 1 + player_cube.view : 0];
         submit_world();
         image_resolve_active = hd_post_world_end(views, hd.views);
         if (image_resolve_active)
@@ -8993,16 +9043,17 @@ static void prepare_shadow_target(void)
     }
 }
 
-static void prepare_environment_shadow(void)
+static void prepare_environment_shadow(uint32 views)
 {
+    XASSERT(views >= 1 && views <= HD_VIEWS);
     if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
         return;
-    if (environment_shadow.target != NULL && environment_shadow.target_views == hd.views)
+    if (environment_shadow.target != NULL && environment_shadow.target_views == views)
         return;
     vid_target_free(environment_shadow.target);
     environment_shadow.ready = 0;
-    environment_shadow.target_views = hd.views;
-    environment_shadow.target = vid_target_create_depth_array(HD_ENV_SHADOW_RESOLUTION, hd.views * HD_ENV_SHADOW_CASCADES);
+    environment_shadow.target_views = views;
+    environment_shadow.target = vid_target_create_depth_array(HD_ENV_SHADOW_RESOLUTION, views * HD_ENV_SHADOW_CASCADES);
     if (environment_shadow.shader == NULL)
     {
         environment_shadow.shader = vid_shader_create_array(environment_depth_vertex_source, environment_depth_fragment_source);
@@ -9064,12 +9115,35 @@ static void prepare_billboard_shadow_facing(void)
 }
 
 static void capture_cascade_cars(uint32 view, uint32 cascade);
+static void prepare_car_presentation(uint32 slot, uint32 pose_view);
+
+static void prepare_cascade_car_poses(uint32 view)
+{
+    float texel = sun_shadow.extent / HD_SHADOW_RESOLUTION;
+    for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+    {
+        HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+        if (!car->active)
+            continue;
+        prepare_car_presentation(slot, view);
+        for (uint32 row = 0; row < 3; ++row)
+        {
+            float center = 0.0f;
+            for (uint32 axis = 0; axis < 3; ++axis)
+                center += sun_shadow.basis.m[row][axis] * car->pose.position.v[axis];
+            car->center[row] = row == 2 ? center : floorf(center / texel + 0.5f) * texel;
+        }
+    }
+}
 
 static void capture_environment_shadow(void)
 {
-    if (!hd.race_frame || hd.paused || !environment_shadow.target)
+    if (!hd.race_frame || hd.paused)
         return;
+    prepare_environment_shadow(hd.views);
     environment_shadow.ready = 0;
+    if (!environment_shadow.target)
+        return;
     if (!sun_shadow.ready || (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
         return;
     if (memcmp(&environment_shadow.basis, &sun_shadow.basis, sizeof(MATRIXF)) != 0)
@@ -9147,6 +9221,7 @@ static void capture_environment_shadow(void)
     environment_shadow.far = fminf(hd_track_horizon(), 64000.0f);
     for (uint32 view = 0; view < hd.views; ++view)
     {
+        prepare_cascade_car_poses(view);
         HD_POSE camera;
         MATRIXF rotation;
         hd_pose_interpolate(&hd.camera_motion[view].previous, &hd.camera_motion[view].current, hd.render_phase, &camera);
@@ -9409,16 +9484,21 @@ typedef struct HD_DEPTH_VIEW
     MATRIXF rotation;
     VEC3F position;
     float projection[4];
-    uint32 resolution;
+    uint32 resolution, pose_view;
 } HD_DEPTH_VIEW;
 
-static void prepare_car_presentation(uint32 slot)
+static void prepare_car_presentation(uint32 slot, uint32 pose_view)
 {
     HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
-    if (car->presentation == player_cube.presentation || car->reference == UINT32_MAX || car->geometry == NULL)
+    if (car->reference == UINT32_MAX || car->geometry == NULL)
         return;
-    const HD_MODEL_DRAW *draw = &hd.model_draws[car->reference];
-    memcpy(car->inputs, draw->instance->poses.object, sizeof(car->inputs));
+    XASSERT(pose_view < hd.views);
+    if (car->presentation == player_cube.presentation && car->pose_view == pose_view)
+        return;
+    // split views straddle pair collisions; match the receiver's pose history
+    const HD_MOTION *motion = &hd.car_motion[pose_view][slot];
+    car->inputs[0] = motion->previous;
+    car->inputs[1] = motion->current;
     hd_pose_interpolate(&car->inputs[0], &car->inputs[1], hd.render_phase, &car->pose);
     MATRIXF body;
     QuatMatrixf(&car->pose.rotation, &body);
@@ -9428,7 +9508,7 @@ static void prepare_car_presentation(uint32 slot)
         MATRIXF transform = body;
         if (part)
         {
-            const HD_WHEEL_MOTION *motion = &hd.wheels[car->view][slot][part - 1];
+            const HD_WHEEL_MOTION *motion = &hd.wheels[pose_view][slot][part - 1];
             HD_WHEEL_SAMPLE sample = motion->current;
             MATRIXF local;
             if (motion->serial == hd.motion_serial && motion->generation == hd.motion_generation)
@@ -9452,12 +9532,13 @@ static void prepare_car_presentation(uint32 slot)
     RotTransf(&body, &local, &car->bounds);
     car->radius = car->body->bounds_radius + 128.0f;
     car->presentation = player_cube.presentation;
+    car->pose_view = pose_view;
 }
 
 static void submit_car_shadow(uint32 slot, const HD_DEPTH_VIEW *view)
 {
     HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
-    prepare_car_presentation(slot);
+    prepare_car_presentation(slot, view->pose_view);
     float uniforms[16][4] = {{0}};
     MATRIXF camera = view->rotation;
     VECTORF position = {view->position.x, view->position.y, view->position.z}, translated;
@@ -9485,10 +9566,12 @@ static void submit_car_shadow(uint32 slot, const HD_DEPTH_VIEW *view)
 
 static void capture_cascade_cars(uint32 view, uint32 cascade)
 {
+    prepare_cascade_car_poses(view);
     float extent = environment_shadow.extent[view][cascade], depth = environment_shadow.depth[view][cascade];
     HD_DEPTH_VIEW pass = {0};
     pass.rotation = environment_shadow.basis;
     pass.resolution = HD_ENV_SHADOW_RESOLUTION;
+    pass.pose_view = view;
     pass.projection[0] = 2.0f / extent;
     pass.projection[1] = -2.0f / extent;
     pass.projection[2] = 2.0f / depth;
@@ -9652,6 +9735,7 @@ static void capture_sun_shadow(void)
         pass.rotation = sun_shadow.basis;
         pass.position = sun_shadow.camera.position;
         pass.resolution = HD_SHADOW_RESOLUTION;
+        pass.pose_view = (uint32)car->view;
         pass.projection[0] = 2.0f / sun_shadow.extent;
         pass.projection[1] = -2.0f / sun_shadow.extent;
         pass.projection[2] = 2.0f / sun_shadow.depth;
@@ -9665,7 +9749,7 @@ static void capture_sun_shadow(void)
         ++sun_shadow.captures;
 }
 
-static void capture_player_cube(void)
+static void capture_player_cube(uint32 player_view)
 {
     static const float basis[6][9] = {{0, 0, -1, 0, 1, 0, 1, 0, 0}, {0, 0, 1, 0, 1, 0, -1, 0, 0}, {1, 0, 0, 0, 0, -1, 0, 1, 0}, {1, 0, 0, 0, 0, 1, 0, -1, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, {-1, 0, 0, 0, 1, 0, 0, 0, -1}};
     static const char vertex[] = HD_SURFACE_GLSL "uniform vec4 uDraw[32];layout(location=0) in vec4 aPos;layout(location=3) in vec4 aNormal;"
@@ -9691,28 +9775,33 @@ static void capture_player_cube(void)
     sint32 completed;
     if (!hd.race_frame || hd.paused || !hd.model_count)
         return;
-    if (!player_cube.target)
+    XASSERT(player_view < hd.views);
+    player_cube.view = player_view;
+    player_cube.ready[player_view] = 0;
+    if (!player_cube.target[player_view])
     {
         VID_MATERIAL_DATA *data;
-        player_cube.target = vid_target_create_cube(HD_CUBE_RESOLUTION);
-        player_cube.shader = vid_shader_create_cube(vertex, fragment);
-        player_cube.material = vid_mat_create();
-        XASSERT(player_cube.target && player_cube.shader && player_cube.material);
-        data = vid_mat_data(player_cube.material);
+        player_cube.target[player_view] = vid_target_create_cube(HD_CUBE_RESOLUTION);
+        if (!player_cube.shader)
+            player_cube.shader = vid_shader_create_cube(vertex, fragment);
+        player_cube.material[player_view] = vid_mat_create();
+        XASSERT(player_cube.target[player_view] && player_cube.shader && player_cube.material[player_view]);
+        data = vid_mat_data(player_cube.material[player_view]);
         data->shader = player_cube.shader;
-        data->texture = vid_target_texture(player_cube.target);
+        data->texture = vid_target_texture(player_cube.target[player_view]);
         vid_tex_set_mip_levels(data->texture, 3);
         data->filter = VID_FILTER_ANISOTROPIC;
         data->blend = VID_BLEND_ALPHA;
         data->depth_test = 1;
         data->cull = 0;
-        vid_mat_commit(player_cube.material);
+        vid_mat_commit(player_cube.material[player_view]);
     }
     prepare_scene();
     memcpy(saved, hd.viewports, sizeof(saved));
-    hd_pose_interpolate(&hd.car_motion[0][race_view.primary_car].previous, &hd.car_motion[0][race_view.primary_car].current, hd.render_phase, &car);
+    uint32 slot = hd.views == 2 ? player_view : race_view.primary_car;
+    hd_pose_interpolate(&hd.car_motion[player_view][slot].previous, &hd.car_motion[player_view][slot].current, hd.render_phase, &car);
     player_cube.camera.position = car.position;
-    const HD_MODEL *body = sun_shadow.cars[race_view.primary_car].body;
+    const HD_MODEL *body = sun_shadow.cars[slot].body;
     XASSERT(body != NULL);
     if (body == NULL)
         return;
@@ -9734,14 +9823,14 @@ static void capture_player_cube(void)
     for (face = 0; face < 6; ++face)
     {
         MATRIXF rotation;
-        completed = face ? vid_target_next_part(face) : vid_target_select_cube_face(player_cube.target, 0);
+        completed = face ? vid_target_next_part(face) : vid_target_select_cube_face(player_cube.target[player_view], 0);
         XASSERT(completed);
         if (!completed)
         {
             vid_cancel();
             break;
         }
-        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE ? 1 + player_cube.view : 0];
         IdentityMatrixf(&rotation);
         memcpy(rotation.m, basis[face], sizeof(rotation.m));
         MatrixQuatf(&rotation, &player_cube.camera.rotation);
@@ -9779,10 +9868,10 @@ static void capture_player_cube(void)
         vid_cancel();
     set_color_pass(HD_PASS_MAIN, NULL, NULL);
     memcpy(hd.viewports, saved, sizeof(saved));
-    player_cube.ready = player_cube.faces == 6;
-    if (!player_cube.ready)
+    player_cube.ready[player_view] = player_cube.faces == 6;
+    if (!player_cube.ready[player_view])
         return;
-    player_cube.serial = hd.motion_serial;
+    player_cube.serial[player_view] = hd.motion_serial;
     ++player_cube.captures;
 }
 
@@ -10060,6 +10149,7 @@ static void capture_lamp_shadows(void)
         for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
             if (masks[lamp] & (1u << slot))
             {
+                pass.pose_view = (uint32)sun_shadow.cars[slot].view;
                 submit_car_shadow(slot, &pass);
                 ++local_lights.shadow_draws;
             }
@@ -10114,19 +10204,20 @@ void hd_present_frame(uint64 processed_field, uint32 fields)
     prepare_billboard_shadow_facing();
     prepare_scene();
     for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
-        prepare_car_presentation(slot);
+        prepare_car_presentation(slot, (uint32)sun_shadow.cars[slot].view);
     prepare_local_lights();
     capture_sun_shadow();
     capture_lamp_shadows();
     if (hd.race_frame && !hd.paused && local_lights.count)
         vid_tex_commit_rows(local_lights.texture, 0, local_lights.count);
     capture_environment_shadow();
-    capture_player_cube();
+    for (uint32 player_view = 0; player_view < hd.views; ++player_view)
+        capture_player_cube(player_view);
     capture_resolved_world();
     if (vid_begin(hd.clear[0], hd.clear[1], hd.clear[2]))
     {
         upload_vram();
-        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE ? 1 + player_cube.view : 0];
         if (hd.paused)
             submit_frozen_scene();
         submit_scene();

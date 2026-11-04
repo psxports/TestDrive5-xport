@@ -480,6 +480,8 @@ static uint32 draw_split_model(uint32 slot, uint32 alternate)
         else
             hd_draw_car_candidate(slot, &render_model, HD_CAR_SPLIT);
     }
+    else
+        hd_draw_car_probe(slot, &render_model);
     return car_update_skid_effects(car);
 }
 

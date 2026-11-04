@@ -153,6 +153,7 @@ typedef enum HD_CAR_FAMILY
 } HD_CAR_FAMILY;
 
 void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *model, HD_CAR_FAMILY family);
+void hd_draw_car_probe(uint32 slot, const MODEL_RESOURCE *model);
 void hd_shadow_quad(uint32 slot, uint32 part, uint32 kind, const VECTORF points[4], const HD_TEXTURE *texture, const RGBC *color, const POINT_T uv[4]);
 void hd_forget_span(const void *bytes, uint32 size);
 void hd_set_back_color(sint32 r, sint32 g, sint32 b);

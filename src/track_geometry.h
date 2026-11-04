@@ -60,6 +60,7 @@ typedef struct TRACK_POSITION_RESULT
 TRACK_POSITION_RESULT track_place_location(TRACK_LOCATION *node, VEC3 *pos);
 uint32 track_surface_height(TRACK_LOCATION *node, const VEC3 *pos, uint32 *height);
 sint32 track_render_surface_height(const TRACK_LOCATION *node, const VEC3 *pos, float *height);
+uint32 track_render_lane_triangles(uint32 node, uint32 lane, VEC3F output[6]);
 uint32 track_update_location(TRACK_LOCATION *node, const VEC3 *pos);
 uint32 track_surface_n_height(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *n, uint32 *height);
 uint32 track_surface_n(TRACK_LOCATION *node, const VEC3 *pos, SVECTOR *output);

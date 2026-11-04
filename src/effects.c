@@ -2150,6 +2150,31 @@ uint32 effect_init_weather(void)
     return mode < 2;
 }
 
+sint32 effect_has_rain(void)
+{
+    const SCENE_LEVEL_DESCRIPTOR *desc = &scene_level_image.desc;
+    sint16 mode;
+    XASSERT(scene_level_image.bytes != NULL && desc->effects_offset <= scene_level_image.size && scene_level_image.size - desc->effects_offset >= 34);
+    const uint8 *definition = scene_level_image.bytes + desc->effects_offset;
+    memcpy(&mode, definition, sizeof(mode));
+    if (mode != 0)
+        return 0;
+    for (uint32 index = 0; index < 8; ++index)
+    {
+        sint16 node, count;
+        memcpy(&node, definition + 2 + index * 4, sizeof(node));
+        memcpy(&count, definition + 4 + index * 4, sizeof(count));
+        if (node >= 0 && (uint32)node < track_geometry.node_count && count > 0)
+            return 1;
+    }
+    return 0;
+}
+
+float effect_rain_amount(void)
+{
+    return weather.mode == 0 ? weather.active_count / 128.0f : 0.0f;
+}
+
 intptr effect_update_weather(CAR_STATE *car)
 {
     uint16 wire_halfword_1, wire_halfword_2;

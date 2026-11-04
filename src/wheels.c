@@ -58,19 +58,22 @@ static void draw_hd_wheel(uint32 slot, uint32 wheel, const SVECTOR *center, floa
     transform.t[0] = translated.vx;
     transform.t[1] = translated.vy;
     transform.t[2] = translated.vz;
-    for (segment = 0; segment < 8; ++segment)
+    if (!hd_wheel_sides(slot))
     {
-        HD_TEXTURE solid = {0};
-        RGBC black = {.rgbc = 0x28000000};
-        RGBC colors[4] = {black, black, black, black};
-        VECTORF vertices[4];
-        for (point = 0; point < 4; ++point)
+        for (segment = 0; segment < 8; ++segment)
         {
-            const SVECTOR *source = &side_vertices[slot][segment * 2 + point].sdk;
-            VECTORF local = {(float)source->vx, (float)source->vy, (float)source->vz};
-            RotTransf(&transform, &local, &vertices[point]);
+            HD_TEXTURE solid = {0};
+            RGBC black = {.rgbc = 0x28000000};
+            RGBC colors[4] = {black, black, black, black};
+            VECTORF vertices[4];
+            for (point = 0; point < 4; ++point)
+            {
+                const SVECTOR *source = &side_vertices[slot][segment * 2 + point].sdk;
+                VECTORF local = {(float)source->vx, (float)source->vy, (float)source->vz};
+                RotTransf(&transform, &local, &vertices[point]);
+            }
+            hd_solid_quad(vertices, &solid, colors, 1);
         }
-        hd_solid_quad(vertices, &solid, colors, 1);
     }
     hd_wheel_hub();
     for (face = 0; face < 2; ++face)

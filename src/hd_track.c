@@ -300,7 +300,7 @@ void hd_track_prepare_gpu(void)
     for (section = 0; section < extended.count; ++section)
     {
         HD_TRACK_BLOCK *block = &extended.blocks[section];
-        hd_prepare_track_geometry(block->models, block->count, block->main_count);
+        hd_prepare_track_geometry(block->models, block->count, block->main_count, section);
     }
     for (section = 0; section < extended.count; ++section)
     {

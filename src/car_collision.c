@@ -45,6 +45,12 @@ static const CAR_SURFACE_RESPONSE surface_responses[32] = {
     {256, 0}, {256, 0}, {256, 0}, {256, 0}, {256, 0}, {208, 2}, {224, 0}, {256, 0}, {256, 0}, {256, 0}, {224, 8}, {256, 0}, {256, 0}, {256, 0}, {256, 0}, {256, 0}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 16}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32}, {224, 32},
 };
 
+sint32 car_surface_slows(uint32 surface)
+{
+    XASSERT(surface < sizeof(surface_responses) / sizeof(surface_responses[0]));
+    return surface_responses[surface].drag != 0;
+}
+
 static uint32 s_table[2048];
 static uint32 contact_heights[8];
 

@@ -1,6 +1,11 @@
 #ifndef TD5_HD_H
 #define TD5_HD_H
 
+// set to 0 to compare the original per-car sun shadow maps
+#ifndef TD5_HD_CASCADE_CARS
+#define TD5_HD_CASCADE_CARS 1
+#endif
+
 #include "psx.h"
 #include "vid.h"
 #include "fixed_math.h"
@@ -21,7 +26,7 @@ sint32 hd_native_capture_required(void);
 void hd_original_track_capture(sint32 enabled);
 void hd_prepare_draw_capacity(uint32 count);
 uint32 hd_prepared_draw_slots(const HD_PREPARED_MODEL *model);
-void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count);
+void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count, uint32 section);
 HD_TRACK_IMAGE *hd_track_image_create(const uint16 *source);
 void hd_track_image_release(HD_TRACK_IMAGE *image);
 void hd_track_image_bind(HD_TRACK_IMAGE *image);
@@ -81,6 +86,8 @@ void hd_begin_frame(uint32 views);
 void hd_begin_race_frame(uint32 views);
 void hd_capture_race_poses(void);
 void hd_distance_lighting(uint32 radius, const uint8 color[3], uint32 height);
+sint32 hd_spatial_lighting(void);
+sint32 hd_wet_reflections_active(void);
 void hd_begin_view(uint32 view, VID_RECT reference);
 void hd_end_frame(void);
 void hd_present_frame(uint64 processed_field, uint32 fields);
@@ -128,6 +135,7 @@ HD_TEXTURE hd_quad_texture(const POINT_T points[4], const RGBC *color);
 void hd_local_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC colors[4]);
 MATRIXF hd_model_transform(void);
 void hd_solid_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC colors[4], sint32 view_space);
+sint32 hd_wheel_sides(uint32 slot);
 void hd_lit_wheel_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC colors[4], const SVECTOR *normal);
 void hd_menu_background(uint32 bank, uint32 height);
 sint32 hd_loading_screen(void);

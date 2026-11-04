@@ -364,6 +364,49 @@ sint32 track_render_surface_height(const TRACK_LOCATION *node, const VEC3 *pos, 
     return 1;
 }
 
+uint32 track_render_lane_triangles(uint32 node, uint32 lane, VEC3F output[6])
+{
+    if (node >= track_geometry.node_count)
+        return 0;
+    const uint8 *desc = track_geometry.node_bytes + (size_t)node * 24;
+    uint32 type = desc[0], lanes = desc[3] & 15;
+    uint16 first, last;
+    VEC3 origin;
+    if (type > 11 || lane >= lanes || (type == 0 && (lane == 0 || lane == lanes - 1)))
+        return 0;
+    memcpy(&first, desc + 4, 2);
+    memcpy(&last, desc + 6, 2);
+    memcpy(&origin, desc + 12, sizeof(origin));
+    sint32 left = first + cell_rules[type].left_offset + (sint32)lane;
+    sint32 right = last + cell_rules[type].right_offset + (sint32)lane;
+    sint32 actions[2] = {1, -1};
+    uint32 count = 2;
+    if (lane == 0 && (type == 3 || type == 4 || type == 6 || type == 7))
+    {
+        actions[0] = type == 3 || type == 4 ? 2 : 1;
+        count = 1;
+    }
+    else if (lane == lanes - 1 && (type == 2 || type == 4 || type == 5 || type == 7))
+    {
+        actions[0] = type == 2 || type == 4 ? -1 : 3;
+        count = 1;
+    }
+    for (uint32 triangle = 0; triangle < count; ++triangle)
+    {
+        sint32 action = actions[triangle];
+        sint32 indices[3] = {left + (action == 2), right + (action == 1), (action == 1 || action == 3 ? left : right) + 1};
+        for (uint32 corner = 0; corner < 3; ++corner)
+        {
+            VEC3_16 point;
+            if (indices[corner] < 0 || (uint32)indices[corner] >= track_geometry.vertex_count)
+                return 0;
+            memcpy(&point, track_geometry.vertex_bytes + (size_t)indices[corner] * sizeof(point), sizeof(point));
+            output[triangle * 3 + corner] = (VEC3F){origin.x + (float)point.x, origin.y + (float)point.y, origin.z + (float)point.z};
+        }
+    }
+    return count;
+}
+
 uint32 track_update_location(TRACK_LOCATION *node, const VEC3 *pos)
 {
     uint16 wire_halfword_1, wire_halfword_2, wire_halfword_3, wire_halfword_4;

@@ -86,6 +86,8 @@ static uint32 draw_police_lights(CAR_STATE *car);
 
 static void draw_hd_lamp(const SVECTOR *lamp, float center_y, const uint32 geometry[8], const POLY_FT4 *material, const POINT_CT *gradient, sint32 billboard)
 {
+    if (gradient != NULL && geometry == headlight_geometry[1] && hd_spatial_lighting())
+        return;
     VECTORF center = {(float)lamp->vx, center_y, (float)lamp->vz}, corners[4];
     HD_TEXTURE texture;
     RGBC colors[4];
@@ -113,19 +115,24 @@ static void draw_hd_lamp(const SVECTOR *lamp, float center_y, const uint32 geome
         float facing;
         for (point = 0; point < 4; ++point)
         {
-            corners[point].vx += center.vx;
-            corners[point].vy += center.vy;
-            corners[point].vz += center.vz;
-            RotTransf(&transform, corners + point, vertices + point);
+            VECTORF local = {corners[point].vx + center.vx, corners[point].vy + center.vy, corners[point].vz + center.vz};
+            RotTransf(&transform, &local, vertices + point);
         }
         facing = vertices[0].vx * (vertices[1].vy * vertices[2].vz - vertices[1].vz * vertices[2].vy) + vertices[0].vy * (vertices[1].vz * vertices[2].vx - vertices[1].vx * vertices[2].vz) + vertices[0].vz * (vertices[1].vx * vertices[2].vy - vertices[1].vy * vertices[2].vx);
         if (facing >= 0.0f)
-            hd_world_quad(vertices, &texture, colors, 1);
+        {
+            if (gradient == NULL)
+                hd_attached_quad(&center, corners, &texture, colors);
+            else
+                hd_world_quad(vertices, &texture, colors, 1);
+        }
     }
 }
 
 static void draw_hd_rear_projection(uint32 slot, const SVECTOR *lamp, float ground_height, const uint32 geometry[8], const POLY_FT4 *material, const POINT_CT gradient[4])
 {
+    if (hd_wet_reflections_active())
+        return;
     const CAR_STATE *car = &car_states[slot];
     HD_TEXTURE texture;
     VECTORF points[4];

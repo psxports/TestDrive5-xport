@@ -70,6 +70,8 @@ uint32 effect_draw_wheel_skids(void);
 uint32 effect_try_col_line(CAR_STATE *car, const VEC3 *corner);
 
 uint32 effect_init_weather(void);
+float effect_rain_amount(void);
+sint32 effect_has_rain(void);
 intptr effect_update_weather(CAR_STATE *car);
 
 #endif

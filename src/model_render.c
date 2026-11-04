@@ -1458,6 +1458,22 @@ static intptr draw_format12(const MODEL_RESOURCE *model_input)
     vertex_offset = ((const MODEL_HEADER *)model_input->bytes)->vertex_offset;
     XASSERT(!(packet_offset > model_input->capacity || sizeof(POLY_FT4) > model_input->capacity - packet_offset));
     billboard_poly = (POLY_FT4 *)(model_input->bytes + packet_offset);
+    // LEGACY FIX
+    // restore neutral night-lamp modulation in the mutable packet, retaining its tint
+    if (scene_level_image.bytes != NULL && scene_level_image.desc.header_offset < scene_level_image.size && scene_level_image.size - scene_level_image.desc.header_offset > 30 && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+    {
+        uint32 peak = billboard_poly->rgbc.r;
+        if (billboard_poly->rgbc.g > peak)
+            peak = billboard_poly->rgbc.g;
+        if (billboard_poly->rgbc.b > peak)
+            peak = billboard_poly->rgbc.b;
+        if (peak != 0 && peak < 128)
+        {
+            billboard_poly->rgbc.r = (uint8)((billboard_poly->rgbc.r * 128u + peak / 2) / peak);
+            billboard_poly->rgbc.g = (uint8)((billboard_poly->rgbc.g * 128u + peak / 2) / peak);
+            billboard_poly->rgbc.b = (uint8)((billboard_poly->rgbc.b * 128u + peak / 2) / peak);
+        }
+    }
     for (vertex = 0; vertex < 3; ++vertex)
     {
         XASSERT(!(model_input->capacity < 2 || (uint32)(prim_offset + 4 + vertex * 2) > model_input->capacity - 2));

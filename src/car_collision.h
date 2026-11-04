@@ -4,6 +4,8 @@
 #include "psx.h"
 #include "car.h"
 
+sint32 car_surface_slows(uint32 surface);
+
 uint32 car_update_pair_cols(void);
 uint32 car_init_pair_cols(void);
 

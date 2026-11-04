@@ -1,14 +1,19 @@
+#include <float.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <float.h>
 
+#include "game.h"
 #include "hd.h"
-#include "hd_track.h"
+#include "hd_scene_material.h"
+#include "hd_draw_slots.h"
+#include "hd_material.h"
+#include "hd_post.h"
+#include "hd_road.h"
 #include "hd_texture_cache.h"
+#include "hd_track.h"
 #include "psx_gpu.h"
 #include "vid_psx_sampling.h"
-#include "game.h"
 
 #if defined(_MSC_VER)
     #pragma function(fmod)
@@ -21,7 +26,8 @@ enum
     HD_BLEND_PASSES = 5
 };
 
-// measured upper sky and horizon source colors, indexed by LEVEL number minus one
+// measured upper sky and horizon source colors, indexed by LEVEL number minus
+// one
 static const uint8 track_fog_colors[40][3] = {
     {51, 48, 42},    // LEVEL01
     {21, 16, 12},    // LEVEL02
@@ -235,9 +241,6 @@ typedef struct HD_VIEW
     VID_RECT viewport;
     VID_RECT reference;
     float reference_aspect;
-    HD_POSE headlight_car[2];
-    VECTORF headlight_origin;
-    sint32 headlight_active;
 } HD_VIEW;
 
 typedef struct HD_SOURCE_GROUP
@@ -339,10 +342,87 @@ typedef struct HD_QUAD_SAMPLE
     float brightness;
 } HD_QUAD_SAMPLE;
 
+// retained immutable histories outlive completed and paused command buffers
+#define HD_HISTORY_BUCKETS 1024
+#define HD_HISTORY_CHUNK_SIZE 256
+typedef struct HD_HISTORY
+{
+    union { HD_POSE poses[2]; HD_WHEEL_SAMPLE wheels[2]; } samples;
+    struct HD_HISTORY *next;
+    uint32 refs, hash, type;
+} HD_HISTORY;
+typedef struct HD_HISTORY_CHUNK
+{
+    struct HD_HISTORY_CHUNK *next;
+    HD_HISTORY entries[HD_HISTORY_CHUNK_SIZE];
+} HD_HISTORY_CHUNK;
+static HD_HISTORY *history_buckets[HD_HISTORY_BUCKETS], *history_free;
+static HD_HISTORY_CHUNK *history_chunks;
+
+static const void *retain_history(const void *previous, const void *current, uint32 size, uint32 type)
+{
+    uint32 hash = 2166136261u ^ type;
+    const uint8 *parts[2] = {previous, current};
+    for (uint32 part = 0; part < 2; ++part)
+        for (uint32 byte = 0; byte < size; ++byte) hash = (hash ^ parts[part][byte]) * 16777619u;
+    uint32 bucket = hash & (HD_HISTORY_BUCKETS - 1);
+    for (HD_HISTORY *entry = history_buckets[bucket]; entry; entry = entry->next)
+        if (entry->hash == hash && entry->type == type && memcmp(&entry->samples, previous, size) == 0 && memcmp((const uint8 *)&entry->samples + size, current, size) == 0)
+        {
+            ++entry->refs;
+            return &entry->samples;
+        }
+    if (history_free == NULL)
+    {
+        HD_HISTORY_CHUNK *chunk = (HD_HISTORY_CHUNK *)calloc(1, sizeof(*chunk));
+        XASSERT(chunk != NULL);
+        chunk->next = history_chunks; history_chunks = chunk;
+        for (uint32 index = 0; index < HD_HISTORY_CHUNK_SIZE; ++index)
+        {
+            chunk->entries[index].next = history_free;
+            history_free = &chunk->entries[index];
+        }
+    }
+    HD_HISTORY *entry = history_free;
+    history_free = entry->next;
+    memcpy(&entry->samples, previous, size);
+    memcpy((uint8 *)&entry->samples + size, current, size);
+    entry->refs = 1; entry->hash = hash; entry->type = type;
+    entry->next = history_buckets[bucket]; history_buckets[bucket] = entry;
+    return &entry->samples;
+}
+
+static const HD_POSE *retain_poses(const HD_POSE *previous, const HD_POSE *current)
+{
+    return (const HD_POSE *)retain_history(previous, current, sizeof(*previous), 0);
+}
+
+static void release_history(const void *samples)
+{
+    if (samples == NULL) return;
+    HD_HISTORY *entry = (HD_HISTORY *)samples;
+    XASSERT(entry->refs != 0);
+    if (--entry->refs != 0) return;
+    HD_HISTORY **link = &history_buckets[entry->hash & (HD_HISTORY_BUCKETS - 1)];
+    while (*link != entry) { XASSERT(*link != NULL); link = &(*link)->next; }
+    *link = entry->next;
+    entry->next = history_free; history_free = entry;
+}
+
+static void free_histories(void)
+{
+    for (uint32 bucket = 0; bucket < HD_HISTORY_BUCKETS; ++bucket) XASSERT(history_buckets[bucket] == NULL);
+    while (history_chunks)
+    {
+        HD_HISTORY_CHUNK *chunk = history_chunks;
+        history_chunks = chunk->next; free(chunk);
+    }
+    history_free = NULL;
+}
+
 typedef struct HD_DRAW_POSES
 {
-    HD_POSE camera[2];
-    HD_POSE object[2];
+    const HD_POSE *camera, *object;
     QUATF facing[2];
     MATRIXF source_transform;
     sint32 relative;
@@ -351,14 +431,13 @@ typedef struct HD_DRAW_POSES
     sint32 centered_billboard;
     sint32 world_translation;
     VECTORF center;
-    HD_WHEEL_SAMPLE wheel[2];
-    sint32 wheel_active;
-    sint32 wheel_hub;
-    HD_PARTICLE_SAMPLE particle[2];
-    sint32 particle_active;
-    VECTORF line[2][2];
-    RGBC line_colors[2];
-    sint32 line_active;
+    sint32 wheel_active, particle_active, line_active;
+    union
+    {
+        struct { const HD_WHEEL_SAMPLE *wheel; sint32 local_wheel_geometry, wheel_hub; };
+        HD_PARTICLE_SAMPLE particle[2];
+        struct { VECTORF line[2][2]; RGBC line_colors[2]; };
+    };
 } HD_DRAW_POSES;
 
 static void object_texture_free(HD_OBJECT_TEXTURE *asset);
@@ -392,14 +471,18 @@ typedef struct HD_MODEL
     uint32 *batch_source_indices;
     VID_VERTEX3D *batch_vertices;
     HD_CACHED_GROUP *source_groups;
-    uint32 source_group_count, uses_sources, source_ready;
+    uint32 source_group_count, uses_sources, source_ready, billboard_shadow_prepared;
     HD_STATIC_POOL *static_pool;
     HD_MOTION motion[HD_VIEWS];
     HD_MOTION facing[HD_VIEWS];
     HD_LIGHT_MOTION lighting[HD_VIEWS];
     uint32 draw_refs;
-    VEC3F bounds_center;
+    VEC3F bounds_center, bounds_half;
+    VEC3F emitter_center;
     float bounds_radius;
+    float emission[3];
+    float emission_gain;
+    uint32 emission_ready;
 } HD_MODEL;
 
 struct HD_TRACK_IMAGE
@@ -411,23 +494,108 @@ struct HD_TRACK_IMAGE
 
 static HD_TRACK_IMAGE *track_image;
 static sint32 loading_image_active;
-
-typedef struct HD_MODEL_DRAW
+static sint32 image_resolve_active;
+static struct
 {
-    const HD_CACHED_GROUP *source_group;
-    uint32 source_order;
-    sint32 car_slot;
-    HD_MODEL *model;
-    HD_TRACK_IMAGE *image;
-    uint8 region_sampling;
-    uint8 texture_transparent;
-    uint8 fog_active;
-    uint8 fog_color[3];
-    float fog_horizon;
+    const struct HD_MODEL_DRAW *owner;
+    uint64 generation;
+    sint32 width, height, ready;
+    float phase;
+} paused_world;
+static struct HD_MODEL_DRAW *image_resolve_draws;
+
+typedef enum HD_COMMAND_KIND
+{
+    HD_COMMAND_MODEL,
+    HD_COMMAND_EFFECT,
+    HD_COMMAND_SOLID,
+    HD_COMMAND_REFLECTION,
+    HD_COMMAND_POLICE
+} HD_COMMAND_KIND;
+
+typedef struct HD_MODEL_INSTANCE
+{
+    struct HD_MODEL_INSTANCE *next_free;
+    uint32 refs, instance_row;
+    uint64 billboard_serial, sampled_serial;
+    float sampled_phase;
+    HD_POSE sampled_object;
+    MATRIXF sampled_world, sampled_wheel, source_wheel_inverse;
+    uint64 wheel_serial;
+    float wheel_phase;
+    uint32 source_wheel_ready;
     MATRIXF transform;
     MATRIXF light;
     MATRIX color;
     float ambient[3];
+    HD_PROJECTION projection[2];
+    HD_DRAW_POSES poses;
+    HD_LIGHT_SAMPLE lighting[2];
+    sint32 light_history;
+} HD_MODEL_INSTANCE;
+
+typedef struct HD_INSTANCE_CHUNK
+{
+    struct HD_INSTANCE_CHUNK *next;
+    HD_MODEL_INSTANCE values[128];
+} HD_INSTANCE_CHUNK;
+static HD_INSTANCE_CHUNK *instance_chunks;
+static HD_MODEL_INSTANCE *instance_free;
+
+static HD_MODEL_INSTANCE *create_instance(void)
+{
+    if (!instance_free)
+    {
+        HD_INSTANCE_CHUNK *chunk = (HD_INSTANCE_CHUNK *)calloc(1, sizeof(*chunk));
+        XASSERT(chunk != NULL);
+        chunk->next = instance_chunks; instance_chunks = chunk;
+        for (uint32 index = 0; index < 128; ++index)
+        {
+            chunk->values[index].next_free = instance_free;
+            instance_free = &chunk->values[index];
+        }
+    }
+    HD_MODEL_INSTANCE *instance = instance_free;
+    instance_free = instance->next_free;
+    memset(instance, 0, sizeof(*instance)); instance->refs = 1;
+    return instance;
+}
+
+static void release_instance(HD_MODEL_INSTANCE *instance)
+{
+    XASSERT(instance && instance->refs);
+    if (--instance->refs) return;
+    release_history(instance->poses.camera);
+    release_history(instance->poses.object);
+    if (instance->poses.wheel_active) release_history(instance->poses.wheel);
+    instance->next_free = instance_free; instance_free = instance;
+}
+
+static void free_instances(void)
+{
+    while (instance_chunks)
+    {
+        HD_INSTANCE_CHUNK *chunk = instance_chunks;
+        for (uint32 index = 0; index < 128; ++index) XASSERT(chunk->values[index].refs == 0);
+        instance_chunks = chunk->next; free(chunk);
+    }
+    instance_free = NULL;
+}
+
+typedef struct HD_MODEL_DRAW
+{
+    HD_MODEL_INSTANCE *instance;
+    const HD_CACHED_GROUP *source_group;
+    uint32 source_order;
+    HD_SURFACE surface;
+    sint32 car_slot;
+    HD_MODEL *model;
+    HD_TRACK_IMAGE *image;
+    uint8 region_sampling, batch_phases;
+    uint8 texture_transparent;
+    uint8 fog_active;
+    uint8 fog_color[3];
+    float fog_horizon;
     uint32 view;
     float focal;
     float scale_x;
@@ -435,16 +603,22 @@ typedef struct HD_MODEL_DRAW
     float center_x;
     float center_y;
     float far_plane;
-    HD_PROJECTION projection[2];
     uint32 first;
     uint32 count;
     uint32 blend;
-    sint32 dynamic;
-    float environment[7][4];
-    HD_ENV_SAMPLE environment_samples[2];
-    float reflection_scale[2];
-    sint32 reflection_centered;
-    HD_DRAW_POSES poses;
+    uint32 instance_row;
+    HD_COMMAND_KIND kind;
+    union
+    {
+        struct
+        {
+            float environment[7][4];
+            HD_ENV_SAMPLE environment_samples[2];
+            float reflection_scale[2];
+            sint32 reflection_centered;
+        };
+        HD_POLICE_INPUT police;
+    };
     HD_QUAD_SAMPLE quad[2];
     HD_TEXTURE quad_texture;
     float quad_uv[4][2];
@@ -457,9 +631,6 @@ typedef struct HD_MODEL_DRAW
     float hub_cue[4];
     float hub_far[3];
     sint32 hub_lit;
-    HD_LIGHT_SAMPLE lighting[2];
-    sint32 light_history;
-    HD_POLICE_INPUT police;
 } HD_MODEL_DRAW;
 
 typedef struct HD_SCENE_BATCH_GROUP
@@ -479,7 +650,9 @@ typedef struct HD_SCENE_BATCH_GROUP
 struct HD_STATIC_GROUP
 {
     HD_SCENE_BATCH_GROUP batch;
+    VID_MATERIAL *depth_material;
     uint32 category, lighting, transparent, cursor;
+    uint32 depth_first, depth_count;
     uint64 submitted[HD_VIEWS];
 };
 
@@ -487,15 +660,19 @@ struct HD_STATIC_POOL
 {
     HD_STATIC_POOL *next;
     VID_GEOMETRY *geometry;
-    VID_INDEX *indices;
+    VID_INDEX *indices, *depth_indices;
     HD_STATIC_GROUP *groups;
-    uint32 group_count;
+    uint32 group_count, track_section;
     VEC3F origin;
+    float light_min[3], light_max[3];
+    uint32 light_bounds_ready, billboard;
 };
 
 static HD_STATIC_POOL *static_pools;
+static uint64 static_pool_generation;
 static uint64 static_dispatch_serial;
 static void static_pools_free(void);
+static void prepare_environment_shadow(void);
 
 typedef struct HD_BATCH_INPUT
 {
@@ -508,14 +685,28 @@ typedef struct HD_BATCH_INPUT
     float ambient[3];
     HD_LIGHT_SAMPLE lighting[2];
     sint32 light_history;
-    uint32 view;
+    uint32 view, instance_row;
     uint32 draw_index;
     uint32 group;
 } HD_BATCH_INPUT;
 
+typedef struct HD_BATCH_GEOMETRY
+{
+    uint32 refs;
+    VID_GEOMETRY *geometry;
+    VID_INDEX *indices;
+} HD_BATCH_GEOMETRY;
+
+static void release_batch_geometry(HD_BATCH_GEOMETRY *storage)
+{
+    if (!storage || --storage->refs) return;
+    vid_mesh_free(storage->geometry); vid_index_free(storage->indices); free(storage);
+}
+
 typedef struct HD_SCENE_BATCH_BANK
 {
     struct HD_SCENE_BATCH_BANK *next;
+    HD_BATCH_GEOMETRY *storage;
     VID_GEOMETRY *geometry;
     VID_INDEX *indices;
     uint32 vertex_capacity, index_capacity, group_capacity, group_count;
@@ -523,14 +714,24 @@ typedef struct HD_SCENE_BATCH_BANK
     HD_BATCH_INPUT *inputs;
     uint32 input_count, input_capacity;
     VEC3F origin;
-    VID_TEXTURE *instances;
-    uint32 instance_capacity;
-    uint64 instance_serial;
+    uint64 instance_serial, membership_serial;
+    uint32 membership_pass, membership_phase, membership_billboard;
 } HD_SCENE_BATCH_BANK;
 
-static HD_SCENE_BATCH_BANK *scene_batch_banks, **scene_batch_cursor;
+static HD_SCENE_BATCH_BANK *scene_batch_banks[2], **scene_batch_cursor;
+static struct
+{
+    VID_TEXTURE *texture;
+    uint32 capacity, count, list_capacity;
+    uint32 *draws;
+    uint64 serial, presentation;
+} billboard_instances;
 static VID_SHADER *scene_batch_shader, *object_texture_shader, *sprite_texture_shader;
 static void scene_batches_free(void);
+static void invalidate_submit_lists(void);
+static void free_submit_lists(void);
+static void coalesce_wheel_draws(uint32 first, uint32 end);
+static void reserve_submit_lists(uint32 capacity);
 static void source_materials_free(void);
 
 typedef struct HD_WORLD_MESH
@@ -672,6 +873,9 @@ typedef struct HD_STATE
     TEXTURE_DESCRIPTOR flares[2];
     sint32 flares_valid;
     uint64 motion_serial;
+    float wetness[2], wetness_floor;
+    float rain_fog[2];
+    uint64 wetness_serial;
     uint32 motion_generation;
     sint32 actor;
     HD_MOTION camera_motion[HD_VIEWS];
@@ -692,6 +896,7 @@ typedef struct HD_STATE
     sint32 object_relative;
     HD_WHEEL_MOTION wheels[HD_VIEWS][15][4];
     HD_WHEEL_MOTION *wheel;
+    uint32 wheel_first;
     sint32 wheel_hub;
     HD_MOTION preview_motion[HD_VIEWS];
     HD_PARTICLE_MOTION particles[HD_VIEWS][50];
@@ -713,6 +918,7 @@ static sint32 original_track_suppressed;
 static struct
 {
     uint64 model_builds, atlas_decodes, images_created, static_batch_builds, static_batch_reuses, vram_rows, seam_components, late_texture_models;
+    uint64 membership_hits, membership_checks, shared_geometry, instance_captures, instance_aliases, billboard_rows, lamp_searches, vram_row_checks, paused_world_reuses;
 } hd_work;
 
 typedef struct HD_CUBE_COMMAND
@@ -721,6 +927,21 @@ typedef struct HD_CUBE_COMMAND
     HD_SCENE_BATCH_GROUP batch;
 } HD_CUBE_COMMAND;
 
+enum { HD_PASS_MAIN, HD_PASS_PLANAR, HD_PASS_CUBE };
+static struct
+{
+    uint32 kind;
+    const HD_POSE *camera;
+    const MATRIXF *rotation;
+} color_pass;
+
+static void set_color_pass(uint32 kind, const HD_POSE *camera, const MATRIXF *rotation)
+{
+    color_pass.kind = kind;
+    color_pass.camera = camera;
+    color_pass.rotation = rotation;
+}
+
 static struct
 {
     VID_TARGET *target;
@@ -728,31 +949,60 @@ static struct
     VID_MATERIAL *material;
     HD_POSE camera;
     uint64 serial, captures;
-    uint32 active, ready, faces;
+    uint32 ready, faces;
     uint64 presentation;
     float reflection_strength;
     HD_CUBE_COMMAND *commands;
     uint32 command_count, command_capacity, recording;
+    MATRIXF camera_matrix;
 } player_cube;
+
+enum
+{
+    HD_PLANAR_DOWNSAMPLE = 4,
+    HD_PLANAR_MIPS = 3
+};
+
+typedef struct HD_PLANAR_SURFACE
+{
+    VEC3F point, normal;
+} HD_PLANAR_SURFACE;
+
+static struct
+{
+    VID_TARGET *target[HD_VIEWS];
+    HD_SCENE_BATCH_BANK *banks[HD_VIEWS];
+    HD_POSE camera;
+    MATRIXF matrix;
+    float oblique[4], projection[HD_VIEWS][3][4], receiver[HD_VIEWS][4];
+    HD_PLANAR_SURFACE surface[HD_VIEWS][2];
+    uint64 serial[HD_VIEWS], generation[HD_VIEWS], captures;
+    uint32 view, ready[HD_VIEWS], paused;
+    sint32 width[HD_VIEWS], height[HD_VIEWS];
+} planar;
+
+static uint32 reflection_binding_view;
+
+static sint32 planar_excludes(const HD_MODEL_DRAW *draw)
+{
+    return draw->view != planar.view || draw->kind == HD_COMMAND_EFFECT || draw->kind == HD_COMMAND_POLICE || draw->instance->poses.particle_active || draw->instance->poses.line_active || (draw->model->visibility == NULL && (draw->instance->poses.relative || draw->instance->poses.view_geometry));
+}
+
+static void prepare_planar_targets(void);
+static void capture_planar_reflections(void);
+static void update_planar_surfaces(void);
 
 static sint32 cube_excludes(const HD_MODEL_DRAW *draw)
 {
     const CAR_STATE *car = &car_states[race_view.primary_car];
-    return draw->view != 0 || (draw->dynamic != 0 && draw->model->visibility == NULL) || draw->model->source == car->render_models[0].bytes || draw->model->source == car->render_models[1].bytes;
+    return draw->view != 0 || (draw->kind != HD_COMMAND_MODEL && draw->model->visibility == NULL) || draw->model->source == car->render_models[0].bytes || draw->model->source == car->render_models[1].bytes;
 }
-
-typedef struct HD_SHADOW_MATERIAL
-{
-    struct HD_SHADOW_MATERIAL *next;
-    VID_MATERIAL *source, *receiver;
-    VID_MATERIAL_DATA source_data;
-} HD_SHADOW_MATERIAL;
 
 enum
 {
     HD_SHADOW_CARS = 14,
-    HD_SHADOW_LAYERS = 16,
-    HD_SHADOW_RESOLUTION = 256,
+    HD_SHADOW_LAYERS = TD5_HD_CASCADE_CARS ? 0 : 16,
+    HD_SHADOW_RESOLUTION = 512,
     HD_CUBE_RESOLUTION = 256,
     HD_SHADOW_TRANSFORMS = 5
 };
@@ -766,7 +1016,14 @@ typedef struct HD_CAR_SHADOW
     float center[3];
     sint32 view;
     uint32 active;
+    uint64 presentation;
+    HD_POSE pose, inputs[2];
+    MATRIXF world[HD_SHADOW_TRANSFORMS];
+    VECTORF bounds;
+    float radius;
 } HD_CAR_SHADOW;
+
+static HD_MODEL tyre_models[CAR_RACE_MODEL_COUNT];
 
 static struct
 {
@@ -780,56 +1037,93 @@ static struct
     float samples[HD_SHADOW_CARS][4];
     uint32 sample_count;
     uint32 directional_only;
-    uint32 active, ready, generation;
+    uint32 ready, generation;
     uint64 captures, casters;
-    HD_SHADOW_MATERIAL *materials;
 } sun_shadow;
 
-static void shadow_pass(VID_MATERIAL *material)
+enum
 {
-    HD_SHADOW_MATERIAL *entry;
-    const VID_MATERIAL_DATA *source;
-    if (!sun_shadow.ready)
+    HD_ENV_SHADOW_RESOLUTION = TD5_HD_CASCADE_CARS ? 2048 : 1024,
+    HD_ENV_SHADOW_CASCADES = 2
+};
+
+static struct
+{
+    VID_TARGET *target;
+    uint32 target_views;
+    VID_SHADER *shader, *billboard_shader;
+    MATRIXF basis, card_basis[HD_VIEWS];
+    uint32 card_basis_valid[HD_VIEWS];
+    float center[HD_VIEWS][HD_ENV_SHADOW_CASCADES][3];
+    float extent[HD_VIEWS][HD_ENV_SHADOW_CASCADES], depth[HD_VIEWS][HD_ENV_SHADOW_CASCADES], split, far;
+    uint32 ready;
+    uint64 captures, draws, billboard_draws;
+    uint32 billboard_vertices, billboard_indices;
+    HD_STATIC_POOL **candidates[HD_VIEWS][HD_ENV_SHADOW_CASCADES];
+    uint32 candidate_count[HD_VIEWS][HD_ENV_SHADOW_CASCADES], candidate_capacity;
+    uint32 *categories[HD_VIEWS], category_capacity;
+    uint64 *category_stamps[HD_VIEWS], category_generation;
+    HD_STATIC_POOL **pools;
+    uint32 pool_count, pool_capacity;
+    uint64 pool_generation;
+} environment_shadow;
+
+enum
+{
+    HD_LOCAL_CARS = HD_SHADOW_CARS,
+    HD_LOCAL_LAMPS = 16,
+    HD_LOCAL_LIGHT_COUNT = HD_LOCAL_CARS * 2 + HD_LOCAL_LAMPS,
+    HD_LIGHT_CELL_AXIS = 32
+};
+
+typedef struct HD_POINT_LIGHT
+{
+    VECTORF position;
+    float color[3], radius;
+    sint32 next;
+    uint32 lamp, section, category;
+} HD_POINT_LIGHT;
+
+static struct
+{
+    VID_TEXTURE *texture;
+    HD_POINT_LIGHT *points;
+    uint32 point_count, point_capacity, rejected_points;
+    sint32 cells[HD_LIGHT_CELL_AXIS * HD_LIGHT_CELL_AXIS];
+    uint16 occupied_cells[HD_LIGHT_CELL_AXIS * HD_LIGHT_CELL_AXIS];
+    uint32 occupied_count;
+    VEC3F origin;
+    uint32 count, lamp_count[HD_VIEWS], lamps[HD_LOCAL_LAMPS];
+    float lamp_distance[HD_LOCAL_LAMPS];
+    uint32 shadow_count, shadow_lights[HD_LOCAL_LAMPS], layer_owner[HD_LOCAL_LAMPS];
+    float layer_gain[HD_LOCAL_LAMPS];
+    uint64 candidate_serial, candidate_generation;
+    uint32 candidate_views;
+    double selection_clock;
+    uint64 shadow_captures, shadow_draws;
+    uint64 presentation;
+} local_lights;
+
+static void bind_scene_material(VID_MATERIAL *material)
+{
+    if (color_pass.kind != HD_PASS_PLANAR && !sun_shadow.ready && environment_shadow.target == NULL && local_lights.texture == NULL)
     {
-        vid_pass(material);
+        hd_scene_material_bind(material, NULL);
         return;
     }
-    for (entry = sun_shadow.materials; entry; entry = entry->next)
-        if (entry->source == material)
-            break;
-    source = vid_mat_data(material);
-    XASSERT(source != NULL);
-    if (entry && memcmp(&entry->source_data, source, sizeof(*source)) != 0)
-    {
-        HD_SHADOW_MATERIAL **link = &sun_shadow.materials;
-        while (*link != entry)
-            link = &(*link)->next;
-        *link = entry->next;
-        vid_mat_free(entry->receiver);
-        free(entry);
-        entry = NULL;
-    }
-    if (!entry)
-    {
-        VID_MATERIAL_DATA *data;
-        entry = (HD_SHADOW_MATERIAL *)calloc(1, sizeof(*entry));
-        XASSERT(entry != NULL);
-        entry->source = material;
-        entry->source_data = *source;
-        entry->receiver = vid_mat_create();
-        XASSERT(entry->receiver != NULL);
-        data = vid_mat_data(entry->receiver);
-        *data = *source;
-        data->aux[1] = vid_target_texture(sun_shadow.target);
-        vid_mat_commit(entry->receiver);
-        entry->next = sun_shadow.materials;
-        sun_shadow.materials = entry;
-    }
-    vid_pass(entry->receiver);
+    HD_SCENE_BINDINGS bindings = {0};
+    bindings.pass = color_pass.kind;
+    bindings.view = reflection_binding_view;
+    bindings.mirrored = color_pass.kind == HD_PASS_PLANAR;
+    bindings.textures[0] = sun_shadow.target ? vid_target_texture(sun_shadow.target) : NULL;
+    bindings.textures[1] = local_lights.texture;
+    bindings.textures[2] = environment_shadow.target ? vid_target_texture(environment_shadow.target) : NULL;
+    bindings.textures[3] = color_pass.kind == HD_PASS_MAIN && planar.ready[reflection_binding_view] ? vid_target_texture(planar.target[reflection_binding_view]) : NULL;
+    hd_scene_material_bind(material, &bindings);
 }
 
 static uint16 vram_snapshot[1024 * 512];
-static uint32 vram_row_versions[512];
+static uint32 vram_row_versions[512], vram_source_rows[512];
 static VID_TARGET *preparation_target;
 static sint32 preparation_active, preparation_blends_ready;
 
@@ -873,6 +1167,14 @@ static HD_RACE_CAR *race_car_resource(const MODEL_RESOURCE *resource)
         if (race_cars[car].geometry.bytes != NULL && (resource->bytes == race_cars[car].geometry.bytes || resource->bytes == race_cars[car].original[0] || resource->bytes == race_cars[car].original[1]))
             return &race_cars[car];
     return NULL;
+}
+
+static sint32 car_material_identity(const MODEL_RESOURCE *resource)
+{
+    for (uint32 slot = 0; slot < CAR_RACE_MODEL_COUNT; ++slot)
+        if (resource->bytes != NULL && (resource->bytes == car_states[slot].render_models[0].bytes || resource->bytes == race_cars[slot].geometry.bytes))
+            return session_car_choices.cars[slot].model[session_options.model_variant];
+    return -1;
 }
 
 static uint8 *copy_car_tim(const uint8 *bytes, uint32 size, uint32 entry, uint32 *length)
@@ -963,9 +1265,13 @@ static const char ui_vertex_source[] = "layout(location=0) in vec4 aPos;\n"
                                        "layout(location=6) in uvec2 aRect;\n"
                                        "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;\n"
                                        "flat out uvec4 vPage;flat out uvec2 vRect;uniform vec4 uDraw[4];\n"
-                                       "void main(){vec2 point=vec2(dot(uDraw[2].xy,aPos.xy),dot(uDraw[2].zw,aPos.xy))+uDraw[3].xy;float x=point.x-uDraw[0].y+aPos.z*(uDraw[0].x-uDraw[1].x)*0.5;"
-                                       "gl_Position=vec4(2.0*x/uDraw[0].x,1.0-2.0*(point.y-uDraw[0].z)/uDraw[0].w,0.0,1.0);"
-                                       "vUV=aUV;vColor=vec4(uDraw[3].z>=0.0?vec3(uDraw[3].z):aColor.rgb/255.0,aAlpha*uDraw[3].w);"
+                                       "void main(){vec2 "
+                                       "point=vec2(dot(uDraw[2].xy,aPos.xy),dot(uDraw[2].zw,aPos.xy))+uDraw[3].xy;"
+                                       "float x=point.x-uDraw[0].y+aPos.z*(uDraw[0].x-uDraw[1].x)*0.5;"
+                                       "gl_Position=vec4(2.0*x/uDraw[0].x,1.0-2.0*(point.y-uDraw[0].z)/"
+                                       "uDraw[0].w,0.0,1.0);"
+                                       "vUV=aUV;vColor=vec4(uDraw[3].z>=0.0?vec3(uDraw[3].z):aColor.rgb/"
+                                       "255.0,aAlpha*uDraw[3].w);"
                                        "vDepth=0.0;vFog=vec2(0.0);vPage=aTex;vRect=aRect;}\n";
 
 static float hd_far_plane(void)
@@ -977,165 +1283,400 @@ static const char shadow_depth_vertex_source[] = "layout(location=0) in vec4 aPo
                                                  "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;"
                                                  "void main(){int i=int(aPos.w)*3;vec4 p=vec4(aPos.xyz,1.0);"
                                                  "vec3 v=vec3(dot(uDraw[i],p),dot(uDraw[i+1],p),dot(uDraw[i+2],p));"
-                                                 "gl_Position=vec4(v.xy*uDraw[15].xy, v.z*uDraw[15].z-1.0,1.0);vUV=vec2(0.0);vColor=vec4(1.0);vDepth=v.z;vFog=vec2(0.0);}";
+                                                 "gl_Position=uDraw[15].w<0.0?vec4(v.xy*uDraw[15].xy,v.z*uDraw[15].z+uDraw[15].w,v.z):vec4(v.xy*uDraw[15].xy, "
+                                                 "v.z*uDraw[15].z-1.0,1.0);vUV=vec2(0.0);vColor=vec4(1.0);vDepth=v.z;vFog="
+                                                 "vec2(0.0);}";
 
 static const char shadow_depth_fragment_source[] = "void main(){outColor=vec4(0.0);}";
 
+static const char environment_depth_vertex_source[] = "layout(location=0) in vec4 aPos;layout(location=1) in vec2 aUV;"
+                                                      "layout(location=4) in vec4 aExtra;uniform vec4 uDraw[3];uniform vec4 uParams[2];"
+                                                      "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;flat out uvec4 vPage;"
+                                                      "void main(){vec4 p=vec4(aPos.xyz,1.0);gl_Position=vec4(dot(uDraw[0],p),"
+                                                      "dot(uDraw[1],p),dot(uDraw[2],p),1.0);vUV=aUV*0.5/uParams[1].xy;"
+                                                      "vPage=uvec4(uint(aExtra.x),uint(aExtra.y),uint(aExtra.w),uint(aExtra.z));"
+                                                      "vColor=vec4(1.0);vDepth=0.0;vFog=vec2(0.0);}";
+
+static const char billboard_depth_vertex_source[] = "layout(location=0) in vec4 aPos;layout(location=1) in vec2 aUV;"
+                                                    "layout(location=3) in vec4 aAnchor;layout(location=4) in vec4 aExtra;uniform vec4 uDraw[6];uniform vec4 uParams[2];"
+                                                    "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;flat out uvec4 vPage;"
+                                                    "void main(){vec3 local=vec3(dot(uDraw[3].xyz,aPos.xyz),dot(uDraw[4].xyz,aPos.xyz),dot(uDraw[5].xyz,aPos.xyz));"
+                                                    "vec4 p=vec4(aAnchor.xyz+local,1.0);gl_Position=vec4(dot(uDraw[0],p),dot(uDraw[1],p),dot(uDraw[2],p),1.0);"
+                                                    "vUV=aUV*0.5/uParams[1].xy;vPage=uvec4(uint(aExtra.x),uint(aExtra.y),uint(aExtra.w),uint(aExtra.z));"
+                                                    "vColor=vec4(1.0);vDepth=0.0;vFog=vec2(0.0);}";
+
+static const char environment_depth_fragment_source[] = "flat in uvec4 vPage;void main(){uint flags=vPage.z;vec4 t;"
+                                                        "if((flags&1024u)!=0u){t=texture(uTex,vec3(vUV,float(vPage.x)));"
+                                                        "if(vPage.w==3u)t+=texture(uTex,vec3(vUV,float(vPage.y)));}"
+                                                        "else t=texture(uTex,vec3(vUV,0.0));"
+                                                        "if((flags&272u)!=0u)t.a=1.0;if(t.a<=0.5&&(flags&256u)==0u)discard;"
+                                                        "outColor=vec4(0.0);}";
+
+// the existing R8 surface channel packs road eligibility and source luminance
+#if TD5_HD_CASCADE_CARS
+#define HD_ENV_SHADOW_TEXELS "2048.0"
+#else
+#define HD_ENV_SHADOW_TEXELS "1024.0"
+#endif
+
+#define HD_FORWARD_WET_GLSL \
+    "uniform highp sampler2D uAux4;\n" \
+    "float roadHash(ivec2 p){uint h=uint(p.x)*1597334677u^uint(p.y)*3812015801u;h=(h^(h>>16u))*2246822519u;return float(h^(h>>13u))*(1.0/4294967295.0);}\n" \
+    "float roadNoise(vec2 p){ivec2 c=ivec2(floor(p));vec2 f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(roadHash(c),roadHash(c+ivec2(1,0)),f.x),mix(roadHash(c+ivec2(0,1)),roadHash(c+ivec2(1,1)),f.x),f.y);}\n" \
+    "vec3 wetRoad(vec3 base){if(vSurfaceId!=6.0||uDraw[HD_U_PLANAR_SETTINGS].x<=0.0||uDraw[HD_U_PLANAR_SETTINGS].y<=0.0||uParams[0].x!=1.0)return base;\n" \
+    "vec3 p=vViewPosition,dx=dFdx(p),dy=dFdy(p),n=normalize(cross(dx,dy)),v=materialView;if(dot(n,v)<0.0)n=-n;\n" \
+    "float incline=clamp(1.0-acos(clamp(abs(dot(n,uDraw[HD_U_PLANAR_WORLD1].xyz)),0.0,1.0))/0.174532925,0.0,1.0),wet=uDraw[HD_U_PLANAR_SETTINGS].x*incline;if(wet<=0.0)return base;\n" \
+    "vec3 world=vec3(dot(uDraw[HD_U_PLANAR_WORLD0],vec4(p,1.0)),dot(uDraw[HD_U_PLANAR_WORLD1],vec4(p,1.0)),dot(uDraw[HD_U_PLANAR_WORLD2],vec4(p,1.0)));\n" \
+    "float puddle=smoothstep(0.525,0.605,0.7*roadNoise(world.xz/768.0)+0.3*roadNoise(world.xz/256.0));\n" \
+    "float tone=clamp(dot(materialAlbedo,vec3(0.299,0.587,0.114)),0.0,1.0),weight=mix(clamp(16.0*tone*tone,0.25,2.0),1.0,puddle);\n" \
+    "float reflectance=min(wet,0.35*incline)*(1.0+3.0*puddle)*weight+0.5*max(wet-0.35*incline,0.0);\n" \
+    "vec3 rx=cross(dy,n),ry=cross(n,dx);float determinant=dot(dx,rx);vec3 offset=vec3(0.0);\n" \
+    "if(abs(determinant)>0.000001)offset=(dFdx(tone)*rx+dFdy(tone)*ry)/determinant;\n" \
+    "offset*=1024.0*(1.0-0.75*tone);offset*=min(1.0,32.0/max(length(offset),0.000001));\n" \
+    "vec4 receiver=vec4(p,1.0);vec3 q=vec3(dot(uDraw[HD_U_PLANAR0],receiver),dot(uDraw[HD_U_PLANAR1],receiver),dot(uDraw[HD_U_PLANAR2],receiver));if(q.z<=0.0)return base;\n" \
+    "vec2 image=q.xy/q.z*0.5+0.5;vec3 distorted=q+vec3(dot(uDraw[HD_U_PLANAR0].xyz,offset),dot(uDraw[HD_U_PLANAR1].xyz,offset),dot(uDraw[HD_U_PLANAR2].xyz,offset));\n" \
+    "if(distorted.z>0.0)image+=clamp(0.5*(distorted.xy/distorted.z-q.xy/q.z),-2.0*uDraw[HD_U_PLANAR_SETTINGS].zw,2.0*uDraw[HD_U_PLANAR_SETTINGS].zw);\n" \
+    "vec2 edge=min(image,1.0-image);float validity=clamp(min(edge.x,edge.y)*32.0,0.0,1.0),fade=clamp((48000.0-length(p))/24000.0,0.0,1.0);\n" \
+    "vec3 reflected=textureLod(uAux4,clamp(image,0.5*uDraw[HD_U_PLANAR_SETTINGS].zw,1.0-0.5*uDraw[HD_U_PLANAR_SETTINGS].zw),2.0*(1.0-clamp(reflectance,0.0,1.0))).rgb;\n" \
+    "float fresnel=0.04+0.96*pow(1.0-max(dot(n,v),0.0),5.0);return mix(base*(1.0-0.16*wet*fade),reflected,0.75*min(1.0,reflectance*fresnel*0.65*fade)*validity);}\n"
+
 #define HD_SUN_SHADOW_GLSL \
+    HD_DRAW_SLOTS_GLSL \
     "\n#ifdef TD5_HEADLIGHTS\n" \
-    "uniform vec4 uDraw[54];uniform highp sampler2DArrayShadow uAux1;in vec3 vShadowCoord;in vec3 vShadowNormal;in vec3 vSunExtra;in vec3 vViewPosition;" \
-    "float vehicleShadow(int tile,vec3 s,float slope){" \
-    "float bias=uDraw[35].y+min(0.008,6.0*slope);s.z-=bias;" \
-    "vec2 t=s.xy/uDraw[35].x-0.5,b=floor(t),f=fract(t);vec2 w0=(3.0-2.0*f)*0.25,w1=(1.0+2.0*f)*0.25;" \
-    "vec2 p0=(b+0.5-1.0+(2.0-f)/(3.0-2.0*f))*uDraw[35].x,p1=(b+0.5+1.0+f/(1.0+2.0*f))*uDraw[35].x;" \
-    "float v=texture(uAux1,vec4(p0,float(tile),s.z))*w0.x*w0.y+texture(uAux1,vec4(p1.x,p0.y,float(tile),s.z))*w1.x*w0.y" \
-    "+texture(uAux1,vec4(p0.x,p1.y,float(tile),s.z))*w0.x*w1.y+texture(uAux1,vec4(p1,float(tile),s.z))*w1.x*w1.y;" \
-    "float edge=clamp(min(min(s.x,1.0-s.x),min(s.y,1.0-s.y))/(4.0*uDraw[35].x),0.0,1.0);return mix(1.0,v,edge);}" \
-    "vec3 shadowLight(vec3 color){if(uDraw[35].z==0.0||uDraw[39].w!=0.0||uParams[0].x!=1.0)return color;" \
-    "float diffuse=1.0;vec3 ambient=uDraw[36].rgb+vSunExtra;if(uDraw[35].w!=0.0){vec3 n=vShadowNormal;if(dot(n,n)<0.000001){n=cross(dFdx(vViewPosition),dFdy(vViewPosition));if(!gl_FrontFacing)n=-n;}" \
-    "n*=inversesqrt(max(dot(n,n),0.000001));diffuse=max(dot(n,uDraw[37].xyz),0.0);}" \
-    "float depthSlope=max(abs(dFdx(vShadowCoord.z)),abs(dFdy(vShadowCoord.z)));if(diffuse<=0.0)return color*ambient;float visibility=1.0;" \
-    "for(int entry=0;entry<int(uDraw[39].x);++entry){int tile=int(uDraw[40+entry].w);vec3 s=vShadowCoord-uDraw[40+entry].xyz+vec3(0.5);" \
-    "if(all(greaterThan(s,vec3(0.0)))&&all(lessThan(s,vec3(1.0))))visibility=min(visibility,vehicleShadow(tile,s,depthSlope));}" \
-    "if(uDraw[35].w==0.0)return color*mix(clamp(uDraw[36].rgb,0.0,1.0),vec3(1.0),visibility);return color*(ambient+uDraw[38].rgb*diffuse*visibility);}" \
-    "\n#else\nvec3 shadowLight(vec3 color){return color;}\n#endif\n"
+    "uniform vec4 uDraw[72];uniform highp sampler2DArrayShadow uAux1;uniform " \
+    "highp sampler2D uAux2;uniform highp sampler2DArrayShadow uAux3;flat in float vSurfaceId;in vec3 vSurfaceTint;in vec3 vShadowCoord;in vec3 " \
+    "vShadowNormal;in vec3 vSunExtra;in vec3 vViewPosition;vec3 materialNormal=vec3(0.0),materialAlbedo=vec3(1.0),materialView=vec3(0.0);vec4 materialProfile=vec4(0.0);float materialNdotV=0.0,materialRoughness=1.0;" HD_SURFACE_GLSL "vec4 surfaceResponse(){return materialProfile;}" \
+    "void surfaceDetail(vec3 albedo){int id=int(vSurfaceId);materialProfile=id>0&&id<surfaceProfiles.length()?surfaceProfiles[id]:uDraw[HD_U_SURFACE];materialAlbedo=clamp(albedo,0.0,1.0);vec3 n=vShadowNormal,dx=dFdx(vViewPosition),dy=dFdy(vViewPosition);" \
+    "if(dot(n,n)<0.000001){n=cross(dx,dy);if(!gl_FrontFacing)n=-n;if(uDraw[HD_U_OBLIQUE]!=vec4(0.0))n=-n;}n*=inversesqrt(max(dot(n,n),0.000001));" \
+    "vec4 profile=surfaceResponse();if(profile.w>0.0){float height=dot(albedo,vec3(0.299,0.587,0.114));" \
+    "vec3 rx=cross(dy,n),ry=cross(n,dx);float determinant=dot(dx,rx);" \
+    "if(abs(determinant)>0.000001){vec3 gradient=(dFdx(height)*rx+dFdy(height)*ry)/determinant;" \
+    "n=normalize(n-2.0*profile.w*gradient);}materialRoughness=0.9+0.2*clamp(height,0.0,1.0);}materialNormal=n;materialView=-normalize(vViewPosition);materialNdotV=max(dot(n,materialView),0.0);materialProfile.x=clamp(materialProfile.x*materialRoughness,0.04,1.0);}" \
+    "float sunVisibility=1.0;float vehicleShadow(int tile,vec3 s,float slope){" \
+    "float bias=uDraw[HD_U_SHADOW_FILTER].y+min(0.008,6.0*slope);s.z-=bias;" \
+    "vec2 t=s.xy/uDraw[HD_U_SHADOW_FILTER].x-0.5,b=floor(t),f=fract(t);vec2 " \
+    "w0=(3.0-2.0*f)*0.25,w1=(1.0+2.0*f)*0.25;" \
+    "vec2 " \
+    "p0=(b+0.5-1.0+(2.0-f)/(3.0-2.0*f))*uDraw[HD_U_SHADOW_FILTER].x,p1=(b+0.5+1.0+f/" \
+    "(1.0+2.0*f))*uDraw[HD_U_SHADOW_FILTER].x;" \
+    "float " \
+    "v=texture(uAux1,vec4(p0,float(tile),s.z))*w0.x*w0.y+texture(uAux1,vec4(p1." \
+    "x,p0.y,float(tile),s.z))*w1.x*w0.y" \
+    "+texture(uAux1,vec4(p0.x,p1.y,float(tile),s.z))*w0.x*w1.y+texture(uAux1," \
+    "vec4(p1,float(tile),s.z))*w1.x*w1.y;" \
+    "float " \
+    "edge=clamp(min(min(s.x,1.0-s.x),min(s.y,1.0-s.y))/" \
+    "(4.0*uDraw[HD_U_SHADOW_FILTER].x),0.0,1.0);return mix(1.0,v,edge);}" \
+    "float environmentWeight(vec3 s){return s.z>0.0&&s.z<1.0?clamp(min(min(s.x,1.0-s.x),min(s.y,1.0-s.y))*16.0,0.0,1.0):0.0;}" \
+    "float environmentSample(vec3 s,float layer,vec3 dx,vec3 dy,float footprint,float depthScale){" \
+    "float derivativeScale=max(max(abs(dx.x),abs(dx.y)),max(abs(dy.x),abs(dy.y)));dx/=max(derivativeScale,1e-20);dy/=max(derivativeScale,1e-20);float determinant=dx.x*dy.y-dx.y*dy.x;vec2 gradient=vec2(0.0);" \
+    "if(abs(determinant)>0.000001)gradient=vec2(dy.y*dx.z-dx.y*dy.z,dx.x*dy.z-dy.x*dx.z)/determinant;" \
+    "float slope=(abs(gradient.x)+abs(gradient.y))*0.5/" HD_ENV_SHADOW_TEXELS ";s.z-=8.192*depthScale+min(max(131.072*depthScale,4.0*footprint),slope);" \
+    "vec2 t=s.xy*" HD_ENV_SHADOW_TEXELS "-0.5,b=floor(t),f=fract(t),w0=(3.0-2.0*f)*0.25,w1=(1.0+2.0*f)*0.25;" \
+    "vec2 p0=(b-0.5+(2.0-f)/(3.0-2.0*f))/" HD_ENV_SHADOW_TEXELS ",p1=(b+1.5+f/(1.0+2.0*f))/" HD_ENV_SHADOW_TEXELS ";" \
+    "vec2 q0=vec2(p1.x,p0.y),q1=vec2(p0.x,p1.y);" \
+    "float v=texture(uAux3,vec4(p0,layer,s.z+dot(gradient,p0-s.xy)))*w0.x*w0.y+" \
+    "texture(uAux3,vec4(q0,layer,s.z+dot(gradient,q0-s.xy)))*w1.x*w0.y+" \
+    "texture(uAux3,vec4(q1,layer,s.z+dot(gradient,q1-s.xy)))*w0.x*w1.y+" \
+    "texture(uAux3,vec4(p1,layer,s.z+dot(gradient,p1-s.xy)))*w1.x*w1.y;" \
+    "return v;}" \
+    "float environmentVisibility(float direct){if(uDraw[HD_U_ENV_SHADOW0].xyz==vec3(0.0))return 1.0;" \
+    "vec4 p=vec4(vViewPosition,1.0);vec3 nearCoord=vec3(dot(uDraw[HD_U_ENV_SHADOW0],p),dot(uDraw[HD_U_ENV_SHADOW1],p),dot(uDraw[HD_U_ENV_SHADOW2],p));" \
+    "vec3 ratio=vec3(uDraw[HD_U_SHADOW_COUNTS].zz,abs(uDraw[HD_U_SUN_AMBIENT].w)),farCoord=nearCoord*ratio+vec3(uDraw[HD_U_LIGHT_WORLD0].w,uDraw[HD_U_LIGHT_WORLD1].w,uDraw[HD_U_LIGHT_WORLD2].w);" \
+    "vec3 dx=dFdx(nearCoord),dy=dFdy(nearCoord);if(direct<=0.0)return 1.0;float layer=uDraw[HD_U_SHADOW_COUNTS].y,depthScale=length(uDraw[HD_U_ENV_SHADOW2].xyz),footprint=depthScale/(" HD_ENV_SHADOW_TEXELS "*max(length(uDraw[HD_U_ENV_SHADOW0].xyz),1e-20));" \
+    "float blend=uDraw[HD_U_SUN_AMBIENT].w<0.0?0.0:smoothstep(0.8*uDraw[HD_U_SUN_DIRECTION].w,uDraw[HD_U_SUN_DIRECTION].w,vViewPosition.z);" \
+    "float weight=environmentWeight(nearCoord)*(1.0-blend),nearValue=1.0,farValue=1.0;" \
+    "if(weight>0.0)nearValue=environmentSample(nearCoord,layer,dx,dy,footprint,depthScale);" \
+    "float farWeight=environmentWeight(farCoord);if(weight<1.0&&farWeight>0.0)farValue=mix(1.0,environmentSample(farCoord,layer+1.0,dx*ratio,dy*ratio,footprint*ratio.z/max(uDraw[HD_U_SHADOW_COUNTS].z,1e-20),depthScale*ratio.z),farWeight);" \
+    "return mix(farValue,nearValue,weight);}" \
+    "vec3 shadowLight(vec3 " \
+    "color){if(uDraw[HD_U_SHADOW_FILTER].z==0.0||uDraw[HD_U_SHADOW_COUNTS].w!=0.0||uParams[0].x!=1.0)return " \
+    "color;" \
+    "float diffuse=1.0;vec3 " \
+    "ambient=uDraw[HD_U_SUN_AMBIENT].rgb+vSunExtra;if(uDraw[HD_U_SHADOW_FILTER].w!=0.0){vec3 " \
+    "n=materialNormal;diffuse=max(dot(n,uDraw[HD_U_SUN_DIRECTION].xyz),0." \
+    "0);}" \
+    "float " \
+    "depthSlope=max(abs(dFdx(vShadowCoord.z)),abs(dFdy(vShadowCoord.z)));float visibility=environmentVisibility(diffuse);if(" \
+    "diffuse<=0.0)return color*ambient;" \
+    "for(int entry=0;entry<int(uDraw[HD_U_SHADOW_COUNTS].x);++entry){int " \
+    "tile=int(uDraw[HD_U_CAR_SAMPLE0+entry].w);vec3 " \
+    "s=vShadowCoord-uDraw[HD_U_CAR_SAMPLE0+entry].xyz+vec3(0.5);" \
+    "if(all(greaterThan(s,vec3(0.0)))&&all(lessThan(s,vec3(1.0))))visibility=" \
+    "min(visibility,vehicleShadow(tile,s,depthSlope));}" \
+    "sunVisibility=visibility;if(uDraw[HD_U_SHADOW_FILTER].w==0.0)return " \
+    "color*mix(clamp(uDraw[HD_U_SUN_AMBIENT].rgb,0.0,1.0),vec3(1.0),visibility);return " \
+    "color*(ambient+uDraw[HD_U_SUN_COLOR].rgb*diffuse*visibility);}" HD_SURFACE_BRDF_GLSL "vec3 surfaceSpecularTint(){return vSurfaceId==4.0?materialAlbedo:vec3(1.0);}vec3 surfaceLight(vec3 color){vec4 profile=surfaceResponse();if(profile.y<=0.0&&profile.z<=0.0)return color;vec3 " \
+    "n=materialNormal;vec3 v=materialView;" \
+    "float transmission=surfaceTransmission(profile,materialNdotV);" \
+    "return color*transmission+uDraw[HD_U_MATERIAL_TINT].rgb*surfaceSpecularTint()*(sunVisibility*surfaceSpecular(profile,n,v,uDraw[HD_U_MATERIAL_SUN].xyz));}" \
+    "vec3 surfaceTint(vec3 fallback){return vSurfaceTint;}" \
+    "vec3 lampCoordinate(vec3 p){return vec3(vec2(p.x,-p.z)/(max(-p.y,0.0001)*1.732050808)*0.5+0.5,0.0);}" \
+    "vec3 lampDirection(vec2 uv){vec2 p=(uv*2.0-1.0)*1.732050808;return vec3(p.x,-1.0,-p.y);}" \
+    "float lampSample(vec2 uv,vec3 ray,vec3 n,vec4 map){vec3 direction=lampDirection(uv),q=lampCoordinate(direction);" \
+    "float along=length(ray)/length(direction),denominator=dot(direction,n);" \
+    "if(abs(denominator)>0.0001){float plane=dot(ray,n)/denominator;if(plane>0.5*along&&plane<2.0*along)along=plane;}" \
+    "float z=along;if(z<=map.y||z>=map.z)return 1.0;" \
+    "float depth=map.z/(map.z-map.y)*(1.0-map.y/z);return texture(uAux1,vec4(q.xy,map.x,depth));}" \
+    "float lampVisibility(vec3 ray,vec3 n,vec4 map){ray+=n*2.0;vec3 q=lampCoordinate(ray);" \
+    "vec2 t=q.xy*512.0-0.5,b=floor(t),f=fract(t),w0=(3.0-2.0*f)*0.25,w1=(1.0+2.0*f)*0.25;" \
+    "vec2 p0=(b-0.5+(2.0-f)/(3.0-2.0*f))/512.0,p1=(b+1.5+f/(1.0+2.0*f))/512.0;" \
+    "return lampSample(p0,ray,n,map)*w0.x*w0.y+lampSample(vec2(p1.x,p0.y),ray,n,map)*w1.x*w0.y+" \
+    "lampSample(vec2(p0.x,p1.y),ray,n,map)*w0.x*w1.y+lampSample(p1,ray,n,map)*w1.x*w1.y;}" \
+    "vec3 surfaceLights(vec3 albedo,vec3 base){if(uDraw[HD_U_LIGHT_ORIGIN].w<=0.0)return base;" \
+    "vec3 " \
+    "p=vec3(dot(uDraw[HD_U_LIGHT_WORLD0].xyz,vViewPosition),dot(uDraw[HD_U_LIGHT_WORLD1].xyz,vViewPosition)," \
+    "dot(uDraw[HD_U_LIGHT_WORLD2].xyz,vViewPosition))+uDraw[HD_U_LIGHT_ORIGIN].xyz;" \
+    "vec3 " \
+    "n=materialNormal;" \
+    "n=vec3(dot(uDraw[HD_U_LIGHT_WORLD0].xyz,n),dot(uDraw[HD_U_LIGHT_WORLD1].xyz,n),dot(uDraw[HD_U_LIGHT_WORLD2].xyz,n));n*=" \
+    "inversesqrt(max(dot(n,n),0.000001));" \
+    "vec4 profile=surfaceResponse();if(vSurfaceId==6.0){float wet=clamp(uDraw[HD_U_PLANAR_SETTINGS].x,0.0,1.0);profile.x=mix(profile.x,0.18,wet);profile.z=wet;}vec3 v=materialView;" \
+    "v=vec3(dot(uDraw[HD_U_LIGHT_WORLD0].xyz,v),dot(uDraw[HD_U_LIGHT_WORLD1].xyz,v),dot(uDraw[HD_U_LIGHT_WORLD2].xyz,v));" \
+    "float transmission=surfaceTransmission(profile,materialNdotV);vec3 irradiance=vec3(0.0),specular=vec3(0.0);for(int " \
+    "light=0;light<int(uDraw[HD_U_LIGHT_ORIGIN].w);++light){vec4 " \
+    "source=texelFetch(uAux2,ivec2(0,light),0);" \
+    "vec3 delta=source.xyz-p;float " \
+    "square=dot(delta,delta),radius2=source.w*source.w;if(square>=radius2)" \
+    "continue;" \
+    "vec3 l=delta*inversesqrt(max(square,0.0001));vec4 " \
+    "axis=texelFetch(uAux2,ivec2(1,light),0),tint=texelFetch(uAux2,ivec2(2," \
+    "light),0);" \
+    "float " \
+    "cone=axis.w<-1.5?smoothstep(0.5,1.0,dot(-l,vec3(0.0,-1.0,0.0))):axis.w<0.0?1.0:smoothstep(axis.w,tint.w,dot(-l,axis.xyz));if(cone<=0." \
+    "0)continue;if(axis.w<-1.5)cone*=cone;" \
+    "float " \
+    "falloff=1.0-square/radius2;falloff=falloff*falloff/(1.0+square/" \
+    "(radius2*0.1));" \
+    "float visibility=axis.w==-2.0?lampVisibility(-delta,n,axis):1.0;vec3 energy=tint.rgb*(cone*falloff*visibility);" \
+    "irradiance+=energy*(max(dot(n,l),0.0)*transmission);specular+=energy*surfaceSpecularTint()*surfaceSpecular(profile,n,v,l);}" \
+    "float diffusePeak=max(irradiance.r,max(irradiance.g,irradiance.b)),specularPeak=max(specular.r,max(specular.g,specular.b));" \
+    "irradiance*=4.0/(4.0+diffusePeak);specular*=0.75/(0.75+specularPeak);vec3 diffuse=albedo*irradiance*uParams[0].y;diffuse/=1.0+max(diffuse.r,max(diffuse.g,diffuse.b));float headroom=max(0.0,1.0-max(base.r,max(base.g,base.b)));return base+diffuse*headroom+specular*uParams[0].y;}" HD_FORWARD_WET_GLSL "\n#else\nvec3 wetRoad(vec3 base){return base;}void surfaceDetail(vec3 albedo){}vec3 shadowLight(vec3 color){return color;}vec3 " \
+    "surfaceLight(vec3 color){return color;}vec3 surfaceTint(vec3 " \
+    "fallback){return fallback;}vec3 surfaceLights(vec3 albedo,vec3 base){return " \
+    "base;}\n#endif\n"
 
 static const char texture_fragment_source[] = HD_SUN_SHADOW_GLSL "flat in uvec4 vPage;flat in uvec2 vRect;\n"
-                                                                 "uint vidPsxWord(ivec2 p){uvec4 c=uvec4(round(texelFetch(uTex,p,0)*vec4(31.0,31.0,31.0,1.0)));"
+                                                                 "uint vidPsxWord(ivec2 p){uvec4 "
+                                                                 "c=uvec4(round(texelFetch(uTex,p,0)*vec4(31.0,31.0,31.0,1.0)));"
                                                                  "return c.r|(c.g<<5)|(c.b<<10)|(c.a<<15);}\n" VID_PSX_SAMPLING_GLSL "void main(){uint flags=vPage.z;uint pass=uint(uParams[0].x);"
                                                                  "bool textured=(flags&1u)!=0u;bool semi=(flags&4u)!=0u;"
                                                                  "if(pass==1u&&!textured&&semi)discard;"
-                                                                 "vec4 color=vColor;"
-                                                                 "if(textured){ivec4 region=ivec4(int(vPage.w&255u),int(vPage.w>>8),ivec2(vRect));"
+                                                                 "vec4 color=vColor;vec3 albedo=color.rgb;"
+                                                                 "if(textured){ivec4 "
+                                                                 "region=ivec4(int(vPage.w&255u),int(vPage.w>>8),ivec2(vRect));"
                                                                  "uint word;uint repeatAxes=((flags&32u)!=0u?1u:0u)|((flags&64u)!=0u?2u:0u);"
                                                                  "vec2 uv=vUV;bool filtered=(flags&8u)!=0u;"
                                                                  "vec4 texel;"
-                                                                 "if(uParams[0].w>0.0){texel=texture(uTex,uv/vec2(region.zw));if(texel.a<=uParams[1].w&&(flags&256u)==0u)discard;color.a*=texel.a;}"
-                                                                 "else if((flags&256u)!=0u){texel=vidPsxFilter(uv,vPage.x,vPage.y,region,repeatAxes,0u,true);}"
-                                                                 "else{if(filtered&&!semi)texel=vidPsxFilter(uv,vPage.x,vPage.y,region,repeatAxes,0u,(flags&16u)!=0u);"
+                                                                 "if(uParams[0].w>0.0){texel=texture(uTex,uv/"
+                                                                 "vec2(region.zw));if(texel.a<=uParams[1].w&&(flags&256u)==0u)discard;color."
+                                                                 "a*=texel.a;}"
+                                                                 "else "
+                                                                 "if((flags&256u)!=0u){texel=vidPsxFilter(uv,vPage.x,vPage.y,region,"
+                                                                 "repeatAxes,0u,true);}"
+                                                                 "else{if(filtered&&!semi)texel=vidPsxFilter(uv,vPage.x,vPage.y,region,"
+                                                                 "repeatAxes,0u,(flags&16u)!=0u);"
                                                                  "else texel=vidPsxSample(uv,vPage.x,vPage.y,region,repeatAxes,semi?pass:0u,"
                                                                  "filtered,(flags&16u)!=0u,word);if(texel.a==0.0)discard;}"
-                                                                 "color.rgb=texel.rgb*((flags&2u)!=0u?vec3(1.0):vColor.rgb*(255.0/128.0));}"
-                                                                 "color.rgb=shadowLight(color.rgb*uParams[0].y);color.a*=uParams[0].z;outColor=vidFog(color);}\n";
+                                                                 "color.rgb=texel.rgb*((flags&2u)!=0u?vec3(1.0):vColor.rgb*(255.0/"
+                                                                 "128.0));albedo=texel.rgb*((flags&2u)!=0u?vec3(1.0):surfaceTint(vColor.rgb*"
+                                                                 "(255.0/128.0)));}"
+                                                                 "surfaceDetail(albedo);color.rgb=surfaceLights("
+                                                                 "albedo,surfaceLight(shadowLight(color.rgb*uParams[0].y)));color.rgb=wetRoad(color.rgb);color.a*=uParams[0].z;outColor=vidFog(color);}\n";
 
-static const char world_vertex_source[] = "uniform vec4 uFog[3];\n"
+static const char world_vertex_source[] = HD_DRAW_SLOTS_GLSL "uniform vec4 uFog[3];\n"
                                           "layout(location=0) in vec4 aPos;layout(location=1) in vec2 aUV;"
                                           "layout(location=2) in vec4 aColor;layout(location=3) in vec4 aNormal;"
                                           "layout(location=4) in vec4 aExtra;\n"
-                                          "#ifndef TD5_SCENE_BATCH\nlayout(location=5) in uvec4 aTex;layout(location=6) in uvec2 aRect;\n"
-                                          "#else\nuniform vec4 uParams[2];uniform highp sampler2D uAux0;\n#define aTex uvec4(uint(aExtra.x),uint(aExtra.y),uint(aExtra.w),uint(aExtra.z))\n#define aRect uvec2(uParams[1].xy)\n#endif\n"
-                                          "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;out vec3 vViewPosition;"
-                                          "flat out uvec4 vPage;flat out uvec2 vRect;uniform vec4 uDraw[54];\n"
-                                          "out vec3 vShadowCoord;out vec3 vShadowNormal;out vec3 vSunExtra;"
-                                          "void main(){vec4 point=vec4(aPos.xyz,1.0);"
-                                          "vec3 p=vec3(dot(uDraw[0],point),dot(uDraw[1],point),dot(uDraw[2],point));"
-                                          "\n#ifdef TD5_SCENE_BATCH\nif(aPos.w<0.0){int instance=int(-aPos.w)-1;vec4 r0=texelFetch(uAux0,ivec2(0,instance),0),r1=texelFetch(uAux0,ivec2(1,instance),0),r2=texelFetch(uAux0,ivec2(2,instance),0);vec4 origin=vec4(r0.w,r1.w,r2.w,1.0);p=vec3(dot(r0.xyz,aPos.xyz),dot(r1.xyz,aPos.xyz),dot(r2.xyz,aPos.xyz))+vec3(dot(uDraw[0],origin),dot(uDraw[1],origin),dot(uDraw[2],origin));}\n#endif\n"
-                                          "vShadowCoord=vec3(dot(uDraw[32],vec4(p,1.0)),dot(uDraw[33],vec4(p,1.0)),dot(uDraw[34],vec4(p,1.0)));vSunExtra=vec3(0.0);vec3 sunNormal=uDraw[19].w!=0.0?uDraw[19].xyz:aNormal.xyz;vShadowNormal=((aNormal.w!=0.0&&aPos.w!=0.0)||uDraw[19].w!=0.0)?vec3(dot(uDraw[0].xyz,sunNormal),dot(uDraw[1].xyz,sunNormal),dot(uDraw[2].xyz,sunNormal)):vec3(0.0);"
-                                          "vViewPosition=p;vec4 projection=uDraw[3];vec4 center=uDraw[4];"
+                                          "#ifndef TD5_SCENE_BATCH\nlayout(location=5) in uvec4 "
+                                          "aTex;layout(location=6) in uvec2 aRect;\n"
+                                          "#else\nuniform vec4 uParams[2];uniform highp sampler2D uAux0;\n#define "
+                                          "aTex "
+                                          "uvec4(uint(aExtra.x),uint(aExtra.y),uint(aExtra.w),uint(aExtra.z))\n#"
+                                          "define aRect uvec2(uParams[1].xy)\n#endif\n"
+                                          "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;out vec3 "
+                                          "vViewPosition;"
+                                          "flat out uvec4 vPage;flat out uvec2 vRect;uniform vec4 uDraw[72];\n"
+                                          "out vec3 vShadowCoord;out vec3 vShadowNormal;out vec3 vSunExtra;out vec3 "
+                                          "vSurfaceTint;flat out float vSurfaceId;"
+                                          "void main(){vSurfaceId=uDraw[HD_U_MATERIAL_TINT].w!=0.0&&uDraw[HD_U_ENV_MODE].x==0.0?floor(aNormal.w*0.5):0.0;if(vSurfaceId==0.0&&uDraw[HD_U_ENV_MODE].x==0.0)vSurfaceId=uDraw[HD_U_MATERIAL_SUN].w;vec4 point=vec4(aPos.xyz,1.0);"
+                                          "vec3 p=vec3(dot(uDraw[HD_U_OBJECT0],point),dot(uDraw[HD_U_OBJECT1],point),dot(uDraw[HD_U_OBJECT2],point));"
+                                          "\n#ifdef TD5_SCENE_BATCH\nif(aPos.w<0.0){int instance=int(-aPos.w)-1;vec4 "
+                                          "r0=texelFetch(uAux0,ivec2(0,instance),0),r1=texelFetch(uAux0,ivec2(1,"
+                                          "instance),0),r2=texelFetch(uAux0,ivec2(2,instance),0);vec4 "
+                                          "origin=vec4(r0.w,r1.w,r2.w,1.0);vec4 world=vec4(vec3(dot(r0.xyz,aPos.xyz),dot(r1.xyz,"
+                                          "aPos.xyz),dot(r2.xyz,aPos.xyz))+origin.xyz,1.0);p=vec3(dot(uDraw[HD_U_OBJECT0],world),dot(uDraw[HD_U_OBJECT1],"
+                                          "world),dot(uDraw[HD_U_OBJECT2],world));if(texelFetch(uAux0,ivec2(3,instance),0).x!=0.0)p=world.xyz-origin.xyz+vec3(dot(uDraw[HD_U_OBJECT0],origin),dot(uDraw[HD_U_OBJECT1],origin),dot(uDraw[HD_U_OBJECT2],origin));}\n#endif\n"
+                                          "vShadowCoord=vec3(dot(uDraw[HD_U_CAR_SHADOW0],vec4(p,1.0)),dot(uDraw[HD_U_CAR_SHADOW1],vec4(p,1.0)),"
+                                          "dot(uDraw[HD_U_CAR_SHADOW2],vec4(p,1.0)));vSunExtra=vec3(0.0);vec3 "
+                                          "sunNormal=uDraw[HD_U_HUB_NORMAL].w!=0.0?uDraw[HD_U_HUB_NORMAL].xyz:aNormal.xyz;vShadowNormal=(("
+                                          "(int(aNormal.w)&1)!=0&&aPos.w!=0.0)||uDraw[HD_U_HUB_NORMAL].w!=0.0)?vec3(dot(uDraw[HD_U_OBJECT0].xyz,"
+                                          "sunNormal),dot(uDraw[HD_U_OBJECT1].xyz,sunNormal),dot(uDraw[HD_U_OBJECT2].xyz,sunNormal)):vec3("
+                                          "0.0);"
+                                          "vViewPosition=p;vSurfaceTint=uDraw[HD_U_MATERIAL_TINT].w==1.0?aColor.rgb/128.0:vec3(1.0);if(uDraw[HD_U_MATERIAL_TINT].w!=1.0)vShadowNormal=vec3(0.0);vec4 "
+                                          "projection=uDraw[HD_U_PROJECTION];vec4 center=uDraw[HD_U_VIEWPORT];"
                                           "float depth=(projection.w+projection.z)/(projection.w-projection.z)*p.z"
-                                          "-2.0*projection.w*projection.z/(projection.w-projection.z)-uDraw[23].w*p.z;"
-                                          "if(uDraw[24].w>0.0){float orderZ=max(projection.z,p.z-uDraw[24].w);"
+                                          "-2.0*projection.w*projection.z/"
+                                          "(projection.w-projection.z)-uDraw[HD_U_PREV_LIGHT0].w*p.z;"
+                                          "if(uDraw[HD_U_PREV_LIGHT1].w>0.0){float orderZ=max(projection.z,p.z-uDraw[HD_U_PREV_LIGHT1].w);"
                                           "depth=((projection.w+projection.z)/(projection.w-projection.z)"
-                                          "-2.0*projection.w*projection.z/((projection.w-projection.z)*orderZ)-uDraw[23].w)*p.z;}"
+                                          "-2.0*projection.w*projection.z/"
+                                          "((projection.w-projection.z)*orderZ)-uDraw[HD_U_PREV_LIGHT0].w)*p.z;}"
                                           "gl_Position=vec4(p.x*projection.x+center.x*p.z,"
                                           "-p.y*projection.y+center.y*p.z,depth,p.z);"
-                                          "if(uDraw[39].w!=0.0)gl_Position=vec4(p.x*projection.x,-p.y*projection.y,2.0*(p.z-projection.z)/(projection.w-projection.z)-1.0,1.0);"
+                                          "if(uDraw[HD_U_OBLIQUE]!=vec4(0.0))gl_Position.z=dot(uDraw[HD_U_OBLIQUE],vec4(p,1.0));"
+                                          "if(uDraw[HD_U_SKY].x!=0.0)gl_Position.z=gl_Position.w*0.999999;"
+                                          "if(uDraw[HD_U_SHADOW_COUNTS].w!=0.0)gl_Position=vec4(p.x*projection.x,-p.y*projection.y,2."
+                                          "0*(p.z-projection.z)/(projection.w-projection.z)-1.0,1.0);"
                                           "vec3 color=aColor.rgb/255.0;vec2 uv=aUV*0.5;vPage=aTex;vRect=aRect;"
-                                          "if(uDraw[12].x!=0.0){color=uDraw[12].yzw/255.0;vec2 atlas=uDraw[17].xy;"
-                                          "if(uDraw[12].x==1.0){vec2 screen=p.xy*uDraw[18].zw/p.z+uDraw[4].zw;"
-                                          "vec2 n=vec2(dot(uDraw[0].xyz,aNormal.xyz),dot(uDraw[1].xyz,aNormal.xyz));"
-                                          "uv=(screen-uDraw[15].xy)*uDraw[15].zw+n*uDraw[16].xy+atlas+uDraw[16].z;"
-                                          "}else{vec4 xs=vec4(aExtra.x,aExtra.z,aNormal.x,aNormal.z),zs=vec4(aExtra.y,aExtra.w,aNormal.y,aNormal.w);"
-                                          "vec4 us=(xs*uDraw[13].x-zs*uDraw[13].y+uDraw[13].z)/8.0;"
-                                          "vec4 vs=(xs*uDraw[13].y+zs*uDraw[13].x+uDraw[13].w)/8.0;"
-                                          "float mu=min(min(us.x,us.y),min(us.z,us.w)),mv=min(min(vs.x,vs.y),min(vs.z,vs.w));"
-                                          "vec2 period=uDraw[14].xy;vec2 mask=vec2(period.x>0.0?floor(mu/period.x)*period.x:0.0,period.y>0.0?floor(mv/period.y)*period.y:0.0);"
-                                          "uv=vec2((aPos.x*uDraw[13].x-aPos.z*uDraw[13].y+uDraw[13].z)/8.0,"
-                                          "(aPos.x*uDraw[13].y+aPos.z*uDraw[13].x+uDraw[13].w)/8.0)-mask+atlas;}"
-                                          "uv=mod(uv,256.0)-atlas;vPage=uvec4(uint(uDraw[18].x),uint(uDraw[18].y),141u,uint(atlas.x)|(uint(atlas.y)<<8));"
-                                          "vRect=uvec2(uDraw[17].zw);}"
-                                          "else if((aNormal.w!=0.0&&aPos.w!=0.0)||uDraw[19].w!=0.0){vec3 normal=uDraw[19].w!=0.0?uDraw[19].xyz:aNormal.xyz/4096.0;"
-                                          "vec3 light=clamp(vec3(dot(uDraw[5].xyz,normal),dot(uDraw[6].xyz,normal),dot(uDraw[7].xyz,normal)),vec3(0.0),vec3(32767.0/4096.0));"
-                                          "vec3 illumination=clamp(uDraw[11].xyz+vec3(dot(uDraw[8].xyz,light),dot(uDraw[9].xyz,light),dot(uDraw[10].xyz,light)),vec3(0.0),vec3(32767.0/4096.0));"
-                                          "if(uDraw[29].w<1.0){vec3 oldLight=clamp(vec3(dot(uDraw[23].xyz,normal),dot(uDraw[24].xyz,normal),dot(uDraw[25].xyz,normal)),vec3(0.0),vec3(32767.0/4096.0));"
-                                          "vec3 oldIllumination=clamp(uDraw[29].xyz+vec3(dot(uDraw[26].xyz,oldLight),dot(uDraw[27].xyz,oldLight),dot(uDraw[28].xyz,oldLight)),vec3(0.0),vec3(32767.0/4096.0));"
-                                          "illumination=mix(oldIllumination,illumination,uDraw[29].w);}if(uDraw[35].z!=0.0&&uDraw[35].w!=0.0){float direct=max(dot(vShadowNormal*inversesqrt(max(dot(vShadowNormal,vShadowNormal),0.000001)),uDraw[37].xyz),0.0);vSunExtra=uDraw[38].w!=0.0?vec3(0.0):max(illumination-uDraw[36].rgb-uDraw[38].rgb*direct,vec3(0.0));}else color*=illumination;"
-                                          "if(uDraw[19].w!=0.0){vec4 anchor=vec4(uDraw[20].xyz,1.0);float z=clamp(dot(uDraw[2],anchor)/uDraw[22].y,0.0,65535.0);"
-                                          "float q=min(131071.0,uDraw[22].x*65536.0/max(z,0.00001));"
-                                          "float cue=clamp((q*uDraw[20].w+uDraw[21].w)/16777216.0,0.0,1.0);"
-                                          "color+=cue*clamp(uDraw[21].rgb-color,vec3(-32768.0/(16.0*255.0)),vec3(32767.0/(16.0*255.0)));}"
+                                          "if(uDraw[HD_U_ENV_MODE].x!=0.0){color=uDraw[HD_U_ENV_MODE].yzw/255.0;vec2 atlas=uDraw[HD_U_ENV_TEXTURE].xy;"
+                                          "if(uDraw[HD_U_ENV_MODE].x==1.0){vec2 screen=p.xy*uDraw[HD_U_ENV_REGION].zw/p.z+uDraw[HD_U_VIEWPORT].zw;"
+                                          "vec2 n=vec2(dot(uDraw[HD_U_OBJECT0].xyz,aNormal.xyz),dot(uDraw[HD_U_OBJECT1].xyz,aNormal.xyz));"
+                                          "uv=(screen-uDraw[HD_U_ENV_ORIGIN].xy)*uDraw[HD_U_ENV_ORIGIN].zw+n*uDraw[HD_U_ENV_SCALE].xy+atlas+uDraw[HD_U_ENV_SCALE].z;"
+                                          "}else{vec4 "
+                                          "xs=vec4(aExtra.x,aExtra.z,aNormal.x,aNormal.z),zs=vec4(aExtra.y,aExtra.w,"
+                                          "aNormal.y,aNormal.w);"
+                                          "vec4 us=(xs*uDraw[HD_U_ENV_TRANSFORM].x-zs*uDraw[HD_U_ENV_TRANSFORM].y+uDraw[HD_U_ENV_TRANSFORM].z)/8.0;"
+                                          "vec4 vs=(xs*uDraw[HD_U_ENV_TRANSFORM].y+zs*uDraw[HD_U_ENV_TRANSFORM].x+uDraw[HD_U_ENV_TRANSFORM].w)/8.0;"
+                                          "float "
+                                          "mu=min(min(us.x,us.y),min(us.z,us.w)),mv=min(min(vs.x,vs.y),min(vs.z,vs.w)"
+                                          ");"
+                                          "vec2 period=uDraw[HD_U_ENV_PERIOD].xy;vec2 "
+                                          "mask=vec2(period.x>0.0?floor(mu/"
+                                          "period.x)*period.x:0.0,period.y>0.0?floor(mv/period.y)*period.y:0.0);"
+                                          "uv=vec2((aPos.x*uDraw[HD_U_ENV_TRANSFORM].x-aPos.z*uDraw[HD_U_ENV_TRANSFORM].y+uDraw[HD_U_ENV_TRANSFORM].z)/8.0,"
+                                          "(aPos.x*uDraw[HD_U_ENV_TRANSFORM].y+aPos.z*uDraw[HD_U_ENV_TRANSFORM].x+uDraw[HD_U_ENV_TRANSFORM].w)/8.0)-mask+atlas;}"
+                                          "uv=mod(uv,256.0)-atlas;vPage=uvec4(uint(uDraw[HD_U_ENV_REGION].x),uint(uDraw[HD_U_ENV_REGION].y),"
+                                          "141u,uint(atlas.x)|(uint(atlas.y)<<8));"
+                                          "vRect=uvec2(uDraw[HD_U_ENV_TEXTURE].zw);}"
+                                          "else if(((int(aNormal.w)&1)!=0&&aPos.w!=0.0)||uDraw[HD_U_HUB_NORMAL].w!=0.0){vec3 "
+                                          "normal=uDraw[HD_U_HUB_NORMAL].w!=0.0?uDraw[HD_U_HUB_NORMAL].xyz:aNormal.xyz/4096.0;"
+                                          "vec3 "
+                                          "light=clamp(vec3(dot(uDraw[HD_U_DRAW_COLOR].xyz,normal),dot(uDraw[HD_U_LIGHT0].xyz,normal),dot("
+                                          "uDraw[HD_U_LIGHT1].xyz,normal)),vec3(0.0),vec3(32767.0/4096.0));"
+                                          "vec3 "
+                                          "illumination=clamp(uDraw[HD_U_AMBIENT].xyz+vec3(dot(uDraw[HD_U_COLOR0].xyz,light),dot(uDraw[HD_U_COLOR1]"
+                                          ".xyz,light),dot(uDraw[HD_U_COLOR2].xyz,light)),vec3(0.0),vec3(32767.0/4096.0));"
+                                          "if(uDraw[HD_U_PREV_AMBIENT].w<1.0){vec3 "
+                                          "oldLight=clamp(vec3(dot(uDraw[HD_U_PREV_LIGHT0].xyz,normal),dot(uDraw[HD_U_PREV_LIGHT1].xyz,normal),"
+                                          "dot(uDraw[HD_U_PREV_LIGHT2].xyz,normal)),vec3(0.0),vec3(32767.0/4096.0));"
+                                          "vec3 "
+                                          "oldIllumination=clamp(uDraw[HD_U_PREV_AMBIENT].xyz+vec3(dot(uDraw[HD_U_PREV_COLOR0].xyz,oldLight),dot("
+                                          "uDraw[HD_U_PREV_COLOR1].xyz,oldLight),dot(uDraw[HD_U_PREV_COLOR2].xyz,oldLight)),vec3(0.0),vec3(32767."
+                                          "0/4096.0));"
+                                          "illumination=mix(oldIllumination,illumination,uDraw[HD_U_PREV_AMBIENT].w);}if(uDraw[HD_U_SHADOW_FILTER]."
+                                          "z!=0.0&&uDraw[HD_U_SHADOW_FILTER].w!=0.0){float "
+                                          "direct=max(dot(vShadowNormal*inversesqrt(max(dot(vShadowNormal,"
+                                          "vShadowNormal),0.000001)),uDraw[HD_U_SUN_DIRECTION].xyz),0.0);vSunExtra=uDraw[HD_U_SUN_COLOR].w!=0.0?"
+                                          "vec3(0.0):max(illumination-uDraw[HD_U_SUN_AMBIENT].rgb-uDraw[HD_U_SUN_COLOR].rgb*direct,vec3(0.0));}"
+                                          "else color*=illumination;"
+                                          "if(uDraw[HD_U_HUB_NORMAL].w!=0.0){vec4 anchor=vec4(uDraw[HD_U_HUB_ANCHOR].xyz,1.0);float "
+                                          "z=clamp(dot(uDraw[HD_U_OBJECT2],anchor)/uDraw[HD_U_HUB_CUE].y,0.0,65535.0);"
+                                          "float q=min(131071.0,uDraw[HD_U_HUB_CUE].x*65536.0/max(z,0.00001));"
+                                          "float cue=clamp((q*uDraw[HD_U_HUB_ANCHOR].w+uDraw[HD_U_HUB_FAR].w)/16777216.0,0.0,1.0);"
+                                          "color+=cue*clamp(uDraw[HD_U_HUB_FAR].rgb-color,vec3(-32768.0/"
+                                          "(16.0*255.0)),vec3(32767.0/(16.0*255.0)));}"
                                           "color=clamp(color,vec3(0.0),vec3(1.0));}"
-                                          "if(uDraw[11].w>=0.0)color=vec3(uDraw[11].w);"
-                                          "vPage.z|=8u;vColor=vec4(color,uDraw[5].w);vUV=uv;vDepth=p.z;vFog=vec2(0.0);"
+                                          "if(uDraw[HD_U_AMBIENT].w>=0.0)color=vec3(uDraw[HD_U_AMBIENT].w);else if(uDraw[HD_U_AMBIENT].w<-1.0)color*= -1.0-uDraw[HD_U_AMBIENT].w;"
+                                          "vPage.z|=8u;vColor=vec4(color,uDraw[HD_U_DRAW_COLOR].w);vUV=uv;vDepth=p.z;vFog=vec2(0.0)"
+                                          ";"
                                           "if(uFog[0].y>uFog[0].x){float d=length(p);"
                                           "vFog=clamp(vec2(log(max(d,uFog[0].x)/uFog[0].x)/log(uFog[0].y/uFog[0].x),"
-                                          "log(max(d,uFog[0].y)/uFog[0].y)/log(uFog[0].z/uFog[0].y)),0.0,1.0);vFog*=vFog;}}\n";
+                                          "log(max(d,uFog[0].y)/uFog[0].y)/log(uFog[0].z/"
+                                          "uFog[0].y)),0.0,1.0);vFog*=vFog;}}\n";
 
 static const char scene_batch_fragment_source[] = HD_SUN_SHADOW_GLSL "flat in uvec4 vPage;flat in uvec2 vRect;\n"
-                                                                     "#ifdef TD5_HEADLIGHTS\n"
-                                                                     "float headlight(){if(uDraw[31].w==0.0)return 0.0;"
-                                                                     "float distance=length(vViewPosition-uDraw[30].xyz);"
-                                                                     "return clamp(uDraw[31].w*(1.0-distance/uDraw[30].w),0.0,1.0);}\n"
-                                                                     "#endif\n"
-                                                                     "void main(){uint flags=vPage.z;float layer=(flags&256u)!=0u||(flags&4u)==0u?0.0:(uParams[0].x==1.0?1.0:2.0);"
-                                                                     "vec4 texel;if((flags&1024u)!=0u){vec2 uv=vUV/vec2(vRect);uint mode=vPage.w;"
-                                                                     "if((flags&272u)!=0u||(flags&4u)==0u||mode==0u){texel=texture(uTex,vec3(uv,float(vPage.x)));if(mode==3u)texel+=texture(uTex,vec3(uv,float(vPage.y)));}"
-                                                                     "else if(uParams[0].x==1.0){texel=mode==2u?vec4(0.0):texture(uTex,vec3(uv,float(vPage.x)));}"
+                                                                     "void main(){uint flags=vPage.z;float "
+                                                                     "layer=(flags&256u)!=0u||(flags&4u)==0u?0.0:(uParams[0].x==1.0?1.0:2.0);"
+                                                                     "vec4 texel;if((flags&1024u)!=0u){vec2 uv=vUV/vec2(vRect);uint "
+                                                                     "mode=vPage.w;"
+                                                                     "if((flags&272u)!=0u||(flags&4u)==0u||mode==0u){texel=texture(uTex,vec3(uv,"
+                                                                     "float(vPage.x)));if(mode==3u)texel+=texture(uTex,vec3(uv,float(vPage.y)));"
+                                                                     "}"
+                                                                     "else "
+                                                                     "if(uParams[0].x==1.0){texel=mode==2u?vec4(0.0):texture(uTex,vec3(uv,float("
+                                                                     "vPage.x)));}"
                                                                      "else{texel=mode==1u?vec4(0.0):texture(uTex,vec3(uv,float(vPage.y)));}"
                                                                      "}else texel=texture(uTex,vec3(vUV/vec2(vRect),layer));"
-                                                                     "if((flags&272u)!=0u)texel.a=1.0;if(texel.a<=uParams[1].w&&(flags&256u)==0u)discard;"
+                                                                     "if((flags&272u)!=0u)texel.a=1.0;if(texel.a<=uParams[1].w&&(flags&256u)=="
+                                                                     "0u)discard;"
                                                                      "vec3 modulation=(flags&2u)!=0u?vec3(1.0):vColor.rgb*(255.0/128.0);"
-                                                                     "float coverage=(uParams[0].x==2.0&&uParams[0].z==1.0)?1.0:max(texel.a,0.00001);"
+                                                                     "float "
+                                                                     "coverage=(uParams[0].x==2.0&&uParams[0].z==1.0)?1.0:max(texel.a,0.00001);"
                                                                      "vec3 color=(texel.rgb/coverage)*modulation*uParams[0].y;\n"
                                                                      "if((flags&8192u)!=0u)color=floor(color*31.0+0.00001)/31.0;\n"
-                                                                     "color=shadowLight(color);\n#ifdef TD5_HEADLIGHTS\n"
-                                                                     "if((flags&4096u)!=0u)color+=(texel.rgb/coverage)*uDraw[31].rgb*headlight()*((flags&16384u)!=0u?0.5:1.0);\n"
-                                                                     "#endif\n"
-                                                                     "outColor=vidFog(vec4(color,vColor.a*texel.a*uParams[0].z));}\n";
+                                                                     "surfaceDetail((texel.rgb/coverage)*((flags&2u)!=0u?vec3(1.0):surfaceTint(modulation)));color=surfaceLights((texel.rgb/"
+                                                                     "coverage)*((flags&2u)!=0u?vec3(1.0):surfaceTint(modulation)),surfaceLight(shadowLight(color)));"
+                                                                     "outColor=vidFog(vec4(wetRoad(color),vColor.a*texel.a*uParams[0].z));}\n";
 
 static const char police_vertex_source[] = "uniform vec4 uFog[3];\n"
                                            "layout(location=0) in vec4 aPos;"
                                            "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;"
                                            "flat out uvec4 vPage;flat out uvec2 vRect;uniform vec4 uDraw[12];\n"
                                            "void main(){vec4 anchor=vec4(uDraw[6].xyz,1.0);"
-                                           "vec3 p=vec3(dot(uDraw[0],anchor),dot(uDraw[1],anchor),dot(uDraw[2],anchor));"
-                                           "int part=int(aPos.z);vUV=vec2(0.0);vColor=vec4(0.0);vDepth=p.z;vFog=vec2(0.0);"
+                                           "vec3 "
+                                           "p=vec3(dot(uDraw[0],anchor),dot(uDraw[1],anchor),dot(uDraw[2],anchor));"
+                                           "int "
+                                           "part=int(aPos.z);vUV=vec2(0.0);vColor=vec4(0.0);vDepth=p.z;vFog=vec2(0.0);"
                                            "if(uFog[0].y>uFog[0].x){float d=length(p);"
                                            "vFog=clamp(vec2(log(max(d,uFog[0].x)/uFog[0].x)/log(uFog[0].y/uFog[0].x),"
-                                           "log(max(d,uFog[0].y)/uFog[0].y)/log(uFog[0].z/uFog[0].y)),0.0,1.0);vFog*=vFog;}"
-                                           "vPage=uvec4(uint(uDraw[7].x),uint(uDraw[7].y),0u,uint(uDraw[7].z)|(uint(uDraw[7].w)<<8));vRect=uvec2(uDraw[8].xy);"
+                                           "log(max(d,uFog[0].y)/uFog[0].y)/log(uFog[0].z/"
+                                           "uFog[0].y)),0.0,1.0);vFog*=vFog;}"
+                                           "vPage=uvec4(uint(uDraw[7].x),uint(uDraw[7].y),0u,uint(uDraw[7].z)|(uint("
+                                           "uDraw[7].w)<<8));vRect=uvec2(uDraw[8].xy);"
                                            "float raw=p.z/uDraw[8].z;float order=raw*0.25;"
-                                           "if(p.z<=1.0||order<=uDraw[8].w||order>=uDraw[11].w){gl_Position=vec4(0.0,0.0,2.0,1.0);return;}"
-                                           "float correction=max(0.0,(raw-400.0)*4096.0/5120.0);float size=32768.0/(raw-correction)*uDraw[6].w/4096.0;"
-                                           "vec2 screen=p.xy*uDraw[5].xy/p.z+uDraw[4].zw;vec2 radial=screen-uDraw[5].zw;vec2 offset;"
-                                           "if(part==0){float angle=dot(radial,radial)>0.0?atan(radial.x,radial.y):0.0;float c=cos(angle),s=sin(angle);vec2 q=aPos.xy*size;"
+                                           "if(p.z<=1.0||order<=uDraw[8].w||order>=uDraw[11].w){gl_Position=vec4(0.0,"
+                                           "0.0,2.0,1.0);return;}"
+                                           "float correction=max(0.0,(raw-400.0)*4096.0/5120.0);float "
+                                           "size=32768.0/(raw-correction)*uDraw[6].w/4096.0;"
+                                           "vec2 screen=p.xy*uDraw[5].xy/p.z+uDraw[4].zw;vec2 "
+                                           "radial=screen-uDraw[5].zw;vec2 offset;"
+                                           "if(part==0){float "
+                                           "angle=dot(radial,radial)>0.0?atan(radial.x,radial.y):0.0;float "
+                                           "c=cos(angle),s=sin(angle);vec2 q=aPos.xy*size;"
                                            "offset=vec2((q.x*c-q.y*s)*0.25,(q.x*s+q.y*c)*(4096.0/32767.0));"
                                            "vUV=vec2((aPos.x+1.0)*0.5,(1.0-aPos.y)*0.5)*uDraw[8].xy;"
                                            "vColor=vec4(uDraw[9].rgb/255.0,1.0);vPage.z=uint(uDraw[9].w)|8u;}"
-                                           "else{vec2 direction=-radial/max(length(radial),0.000001);float angle=aPos.x*size*(6.283185307179586/4096.0);"
+                                           "else{vec2 direction=-radial/max(length(radial),0.000001);float "
+                                           "angle=aPos.x*size*(6.283185307179586/4096.0);"
                                            "float c=cos(angle),s=sin(angle),sign=part==1?-1.0:1.0;"
-                                           "offset=sign*size*4.0*vec2(direction.x*c-direction.y*s,direction.x*s+direction.y*c)*aPos.w;"
-                                           "vec4 color=part==1?uDraw[10]:uDraw[11];vColor=vec4(color.rgb*(1.0-aPos.w)/255.0,1.0);"
+                                           "offset=sign*size*4.0*vec2(direction.x*c-direction.y*s,direction.x*s+"
+                                           "direction.y*c)*aPos.w;"
+                                           "vec4 "
+                                           "color=part==1?uDraw[10]:uDraw[11];vColor=vec4(color.rgb*(1.0-aPos.w)/"
+                                           "255.0,1.0);"
                                            "vPage.z=uint(part==1?uDraw[10].w:uDraw[3].z);}"
                                            "p.xy+=offset*p.z/uDraw[5].xy;vec4 projection=uDraw[3];"
-                                           "float depth=(projection.w+1.0)/(projection.w-1.0)*p.z-2.0*projection.w/(projection.w-1.0);"
-                                           "gl_Position=vec4(p.x*projection.x+uDraw[4].x*p.z,-p.y*projection.y+uDraw[4].y*p.z,depth,p.z);}\n";
+                                           "float "
+                                           "depth=(projection.w+1.0)/(projection.w-1.0)*p.z-2.0*projection.w/"
+                                           "(projection.w-1.0);"
+                                           "gl_Position=vec4(p.x*projection.x+uDraw[4].x*p.z,-p.y*projection.y+uDraw["
+                                           "4].y*p.z,depth,p.z);}\n";
 
-static const char map_vertex_source[] = "layout(location=0) in vec4 aPos;layout(location=1) in vec2 aUV;layout(location=2) in vec4 aColor;"
-                                        "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;out vec2 vMapPoint;uniform vec4 uDraw[6];\n"
+static const char map_vertex_source[] = "layout(location=0) in vec4 aPos;layout(location=1) in vec2 "
+                                        "aUV;layout(location=2) in vec4 aColor;"
+                                        "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;out vec2 "
+                                        "vMapPoint;uniform vec4 uDraw[6];\n"
                                         "vec2 projectPoint(vec2 p){vec2 d=p-uDraw[0].xy;return vec2(50.0,32.0)+"
-                                        "vec2(d.x*uDraw[0].z+d.y*uDraw[0].w,-d.x*uDraw[0].w+d.y*uDraw[0].z)*uDraw[1].xy;}"
+                                        "vec2(d.x*uDraw[0].z+d.y*uDraw[0].w,-d.x*uDraw[0].w+d.y*uDraw[0].z)*uDraw["
+                                        "1].xy;}"
                                         "void main(){vec2 point;int mode=int(uDraw[1].z);"
-                                        "if(mode==1)point=projectPoint(uDraw[3].zw)+aPos.xy;else{point=projectPoint(aPos.xy);"
-                                        "if(mode==2){vec2 delta=projectPoint(aPos.zw)-point;float len=length(delta);"
+                                        "if(mode==1)point=projectPoint(uDraw[3].zw)+aPos.xy;else{point="
+                                        "projectPoint(aPos.xy);"
+                                        "if(mode==2){vec2 delta=projectPoint(aPos.zw)-point;float "
+                                        "len=length(delta);"
                                         "if(len>0.000001)point+=vec2(delta.y,-delta.x)/len*aUV.x;}}"
                                         "point+=uDraw[2].xy;vMapPoint=point;"
                                         "float x=point.x-uDraw[4].y-(uDraw[4].x-uDraw[5].x)*0.5;"
-                                        "gl_Position=vec4(2.0*x/uDraw[4].x,1.0-2.0*(point.y-uDraw[4].z)/uDraw[4].w,0.0,1.0);"
-                                        "vUV=vec2(0.0);vColor=vec4(aColor.rgb/255.0,1.0);vDepth=0.0;vFog=vec2(0.0);}\n";
+                                        "gl_Position=vec4(2.0*x/uDraw[4].x,1.0-2.0*(point.y-uDraw[4].z)/"
+                                        "uDraw[4].w,0.0,1.0);"
+                                        "vUV=vec2(0.0);vColor=vec4(aColor.rgb/"
+                                        "255.0,1.0);vDepth=0.0;vFog=vec2(0.0);}\n";
 
 static const char map_fragment_source[] = "in vec2 vMapPoint;uniform vec4 uDraw[6];"
-                                          "void main(){if(any(lessThan(vMapPoint,uDraw[2].zw))||any(greaterThanEqual(vMapPoint,uDraw[2].zw+uDraw[3].xy)))discard;"
+                                          "void "
+                                          "main(){if(any(lessThan(vMapPoint,uDraw[2].zw))||any(greaterThanEqual("
+                                          "vMapPoint,uDraw[2].zw+uDraw[3].xy)))discard;"
                                           "if(uint(uParams[0].x)==1u&&uDraw[1].w!=0.0)discard;"
                                           "outColor=vec4(vColor.rgb*uParams[0].y,vColor.a*uParams[0].z);}\n";
 
@@ -1221,18 +1762,6 @@ void hd_capture_race_poses(void)
         HD_POSE pose;
         hd_pose_from_native(&pose, &car_states[slot].transform, &car_states[slot].pos);
         motion_update(&hd.car_motion[hd.view][slot], &pose, 0);
-    }
-    {
-        HD_VIEW *view = &hd.viewports[hd.view];
-        uint32 tracked = hd.views == 1 ? race_view.tracked_car : hd.view;
-        view->headlight_active = 0;
-        if (tracked < 14 && distance_lighting.radius > 0.0f && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
-        {
-            view->headlight_car[0] = hd.car_motion[hd.view][tracked].previous;
-            view->headlight_car[1] = hd.car_motion[hd.view][tracked].current;
-            view->headlight_origin = (VECTORF){0, (float)(sint32)model_render.reference_offset_y, (float)(sint32)model_render.reference_offset_z};
-            view->headlight_active = 1;
-        }
     }
     hd.race_pose_views |= 1u << hd.view;
 }
@@ -1328,7 +1857,7 @@ void hd_camera_reset(uint32 view)
     {
         hd.particles[view][slot].generation = ~hd.motion_generation;
         hd.lines[view][slot].generation = ~hd.motion_generation;
-        hd.retired_effects[view][slot].kind = 0;
+        hd.retired_effects[view][slot].kind = HD_COMMAND_MODEL;
     }
     for (slot = 0; slot < 128; ++slot)
     {
@@ -1371,6 +1900,7 @@ void hd_wheel_begin(uint32 wheel, const SVECTOR *center, float steering, float s
     }
     if (actor == 14)
         motion_update(&hd.preview_motion[hd.view], &hd.object_pose, 0);
+    hd.wheel_first = hd.model_count;
     hd.wheel = motion;
     hd.wheel_hub = 0;
 }
@@ -1382,6 +1912,8 @@ void hd_wheel_hub(void)
 
 void hd_wheel_end(void)
 {
+    if (hd.wheel != NULL)
+        coalesce_wheel_draws(hd.wheel_first, hd.model_count);
     hd.wheel = NULL;
 }
 
@@ -1394,7 +1926,7 @@ void hd_effect_reset(uint32 slot)
         hd.particles[view][slot].generation = ~hd.motion_generation;
         hd.lines[view][slot].generation = ~hd.motion_generation;
         if (hd.retired_effects[view][slot].generation != hd.motion_generation)
-            hd.retired_effects[view][slot].kind = 0;
+            hd.retired_effects[view][slot].kind = HD_COMMAND_MODEL;
     }
 }
 
@@ -1543,6 +2075,7 @@ static void discard_draws(HD_MODEL_DRAW *draws, uint32 *count)
         XASSERT(draws[index].model->draw_refs != 0);
         --draws[index].model->draw_refs;
         hd_track_image_release(draws[index].image);
+        release_instance(draws[index].instance);
     }
     *count = 0;
 }
@@ -1801,7 +2334,8 @@ static HD_OBJECT_TEXTURE *object_texture_layout(VID_VERTEX16 *vertices, uint32 c
         point->rect[1] = (uint16)asset->height;
         point->tex[3] = 0;
     }
-    // retain only the packed words and palettes actually covered by this object's charts
+    // retain only the packed words and palettes actually covered by this object's
+    // charts
     for (chart = 0; chart < asset->count; ++chart)
     {
         HD_OBJECT_CHART *part = &asset->charts[chart];
@@ -2042,6 +2576,7 @@ static VID_MATERIAL *object_texture_material(const HD_MODEL_DRAW *draw, uint32 p
         data = vid_mat_data(asset->materials[pass]);
         data->texture = asset->image->texture;
         data->shader = object_texture_shader;
+        data->surface_write = 0;
         data->filter = VID_FILTER_ANISOTROPIC;
         data->depth_test = 1;
         data->depth_write = pass == 0;
@@ -2051,6 +2586,27 @@ static VID_MATERIAL *object_texture_material(const HD_MODEL_DRAW *draw, uint32 p
         data->params[5] = (float)asset->height;
         asset->image->material_data[state][pass] = *data;
         vid_mat_commit(asset->materials[pass]);
+    }
+    if (draw->model->kind == 12 && !draw->model->emission_ready)
+    {
+        const uint8 *pixels = vid_tex_data(asset->image->texture);
+        if (pixels != NULL)
+        {
+            draw->model->emission_ready = 1;
+            float sum[3] = {0};
+            for (uint32 pixel = 0; pixel < asset->image->width * asset->image->height * asset->image->layers; ++pixel)
+            {
+                const uint8 *color = pixels + pixel * 4;
+                float weight = (float)(color[0] > color[1] ? color[0] : color[1]);
+                weight = fmaxf(weight, (float)color[2]) * (color[3] / 255.0f);
+                for (uint32 channel = 0; channel < 3; ++channel)
+                    sum[channel] += color[channel] * weight;
+            }
+            float maximum = fmaxf(sum[0], fmaxf(sum[1], sum[2]));
+            if (maximum > 0.0f)
+                for (uint32 channel = 0; channel < 3; ++channel)
+                    draw->model->emission[channel] = sum[channel] / maximum;
+        }
     }
     return asset->materials[pass];
 }
@@ -2286,6 +2842,7 @@ sint32 hd_init(void)
         hd.world_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.world_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 1;
         data->depth_write = pass == 0;
         data->cull = 2;
@@ -2293,6 +2850,7 @@ sint32 hd_init(void)
         hd.sky_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.sky_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 0;
         data->depth_write = 0;
         data->cull = 0;
@@ -2300,6 +2858,7 @@ sint32 hd_init(void)
         hd.effect_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.effect_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 1;
         data->depth_write = 0;
         data->cull = 0;
@@ -2307,6 +2866,7 @@ sint32 hd_init(void)
         hd.retire_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.retire_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 1;
         data->depth_write = 0;
         data->cull = 0;
@@ -2321,6 +2881,7 @@ sint32 hd_init(void)
         hd.solid_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.solid_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 1;
         data->depth_write = pass == 0;
         data->cull = 0;
@@ -2328,6 +2889,7 @@ sint32 hd_init(void)
         hd.environment_materials[pass] = create_ui_material(pass);
         data = vid_mat_data(hd.environment_materials[pass]);
         data->shader = hd.world_shader;
+        data->surface_write = 0;
         data->depth_test = 1;
         data->depth_write = 0;
         data->cull = 2;
@@ -2363,6 +2925,10 @@ static void upload_vram(void)
     for (row = 0; row < 512; ++row)
     {
         uint32 x, offset = row * 1024;
+        uint32 source_version = gpu_vram_row_version(row);
+        if (hd.vram_valid && vram_source_rows[row] == source_version) continue;
+        vram_source_rows[row] = source_version;
+        ++hd_work.vram_row_checks;
         if (hd.vram_valid && memcmp(vram_snapshot + offset, VRAM + offset, 1024 * sizeof(uint16)) == 0)
             continue;
         memcpy(vram_snapshot + offset, VRAM + offset, 1024 * sizeof(uint16));
@@ -2421,13 +2987,21 @@ void hd_suspend(void)
 
 void hd_reset(void)
 {
-    while (sun_shadow.materials)
-    {
-        HD_SHADOW_MATERIAL *entry = sun_shadow.materials;
-        sun_shadow.materials = entry->next;
-        vid_mat_free(entry->receiver);
-        free(entry);
-    }
+    set_color_pass(HD_PASS_MAIN, NULL, NULL);
+    hd_post_reset();
+    for (uint32 view = 0; view < HD_VIEWS; ++view)
+        vid_target_free(planar.target[view]);
+    memset(&paused_world, 0, sizeof(paused_world));
+    hd.wetness[0] = hd.wetness[1] = 0;
+    hd.rain_fog[0] = hd.rain_fog[1] = 0;
+    hd.wetness_serial = 0;
+    hd.wetness_floor = 0.0f;
+    image_resolve_active = 0;
+    image_resolve_draws = NULL;
+    hd_scene_material_reset();
+    vid_tex_free(local_lights.texture);
+    free(local_lights.points);
+    memset(&local_lights, 0, sizeof(local_lights));
     for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
     {
         vid_mesh_free(sun_shadow.cars[slot].geometry);
@@ -2437,6 +3011,17 @@ void hd_reset(void)
     vid_shader_free(sun_shadow.shader);
     vid_target_free(sun_shadow.target);
     memset(&sun_shadow, 0, sizeof(sun_shadow));
+    vid_target_free(environment_shadow.target);
+    vid_shader_free(environment_shadow.shader);
+    vid_shader_free(environment_shadow.billboard_shader);
+    for (uint32 view = 0; view < HD_VIEWS; ++view)
+    {
+        for (uint32 cascade = 0; cascade < HD_ENV_SHADOW_CASCADES; ++cascade) free(environment_shadow.candidates[view][cascade]);
+        free(environment_shadow.categories[view]);
+        free(environment_shadow.category_stamps[view]);
+    }
+    free(environment_shadow.pools);
+    memset(&environment_shadow, 0, sizeof(environment_shadow));
     free(player_cube.commands);
     vid_mat_free(player_cube.material);
     vid_shader_free(player_cube.shader);
@@ -2444,6 +3029,8 @@ void hd_reset(void)
     memset(&player_cube, 0, sizeof(player_cube));
     hd_suspend();
     scene_batches_free();
+    invalidate_submit_lists();
+    memset(&planar, 0, sizeof(planar));
     static_pools_free();
     source_materials_free();
     track_image = NULL;
@@ -2456,6 +3043,13 @@ void hd_reset(void)
     release_retired_models();
     hd.ui_count = 0;
     sprite_textures_free();
+    for (uint32 slot = 0; slot < CAR_RACE_MODEL_COUNT; ++slot)
+    {
+        XASSERT(tyre_models[slot].draw_refs == 0);
+        vid_mesh_free(tyre_models[slot].geometry);
+        vid_index_free(tyre_models[slot].indices);
+    }
+    memset(tyre_models, 0, sizeof(tyre_models));
     {
         uint32 car, image;
         for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
@@ -2477,6 +3071,9 @@ void hd_free(void)
     HD_WORLD_MESH *world;
     uint32 pass;
     hd_reset();
+    free_submit_lists();
+    free_instances();
+    free_histories();
     while ((mesh = hd.ui_meshes) != NULL)
     {
         hd.ui_meshes = mesh->next;
@@ -2658,6 +3255,11 @@ void hd_begin_frame(uint32 views)
 
 void hd_begin_race_frame(uint32 views)
 {
+    if (hd.wetness_serial == 0)
+    {
+        hd.wetness_floor = effect_has_rain() ? 0.35f : 0.0f;
+        hd.wetness[0] = hd.wetness[1] = hd.wetness_floor;
+    }
     const DRAWENV *draw = &disp_state.frames[0].draw;
     begin_frame(views, draw->r0 / 255.0f, draw->g0 / 255.0f, draw->b0 / 255.0f, 1);
 }
@@ -3160,7 +3762,8 @@ void hd_transform_model(const MATRIX *rotation, const VEC3 *position, sint32 cam
     uint32 component;
     if (!hd_capture_active())
         return;
-    // sky pieces share integer authored seams after the original fixed-point shift
+    // sky pieces share integer authored seams after the original fixed-point
+    // shift
     hd.object_pose.position.x = camera_relative ? (float)(position->x >> 8) : position->x / 256.0f;
     hd.object_pose.position.y = camera_relative ? (float)(position->y >> 8) : position->y / 256.0f;
     hd.object_pose.position.z = camera_relative ? (float)(position->z >> 8) : position->z / 256.0f;
@@ -3273,6 +3876,7 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
     static const uint8 triangle_indices[6] = {0, 1, 2, 1, 3, 2};
     const MODEL_HEADER *header = (const MODEL_HEADER *)resource->bytes;
     HD_RACE_CAR *private_car = race_car_resource(resource);
+    sint32 material_car = car_material_identity(resource);
     uint32 offset, vertices = 0, indices = 0, faces = 0, pass;
     HD_MODEL *model = NULL;
     VID_VERTEX16 *destination = NULL;
@@ -3376,6 +3980,25 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
                         if (v > max_v)
                             max_v = v;
                     }
+                    HD_SURFACE surface = material_car >= 0 && variant != 2 ? HD_SURFACE_COATED : HD_SURFACE_AUTHORED;
+                    if (material_car >= 0 && group.kind >= 2 && variant != 2 && (min_u >> 7) == (max_u >> 7))
+                        surface = hd_car_surface((unsigned)material_car, min_u & 127, min_v, max_u & 127, max_v);
+                    if (surface == HD_SURFACE_AUTHORED && material_car < 0 && header->renderer < 10 && visibility == NULL && variant == 0 && hd_road_active())
+                    {
+                        VEC3F points[4];
+                        for (point = 0; point < count; ++point)
+                        {
+                            sint16 source_index;
+                            VEC3_16 position;
+                            memcpy(&source_index, record + point * sizeof(source_index), sizeof(source_index));
+                            sint64 source_offset = (sint64)header->vertex_offset + (sint64)source_index * sizeof(SVECTOR);
+                            XASSERT(source_offset >= 0 && (uint64)source_offset + sizeof(position) <= resource->capacity);
+                            memcpy(&position, resource->bytes + source_offset, sizeof(position));
+                            points[point] = (VEC3F){(header->position.x >> 8) + (float)position.x, (header->position.y >> 8) + (float)position.y, (header->position.z >> 8) + (float)position.z};
+                        }
+                        if (hd_road_face(points, count))
+                            surface = HD_SURFACE_ROAD;
+                    }
                     filtered = private_car != NULL && group.kind >= 2 ? 1 : tex_find_region((uint16)page, (uint16)clut, min_u, min_v, max_u, max_v, &region);
                     if (!filtered)
                     {
@@ -3428,7 +4051,8 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
                         target->pos[1] = position.vy;
                         target->pos[2] = position.vz;
                         target->pos[3] = 1;
-                        // keep constant source UVs inside their texel despite perspective rounding
+                        // keep constant source UVs inside their texel despite perspective
+                        // rounding
                         target->uv[0] = (sint16)(2 * ((flat_points != NULL ? flat_points[point].uv.u : gouraud_points[point].uv.u) - region.u) + (min_u == max_u));
                         target->uv[1] = (sint16)(2 * ((flat_points != NULL ? flat_points[point].uv.v : gouraud_points[point].uv.v) - region.v) + (min_v == max_v));
                         memcpy(target->color, &color, sizeof(color));
@@ -3436,7 +4060,9 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
                         target->n[1] = normal.vy;
                         target->n[2] = normal.vz;
                         target->n[3] = visibility == NULL && (header->renderer == 1 || header->renderer == 3 || header->renderer == 9);
-                        model->has_lighting |= target->n[3] != 0;
+                        if (surface != HD_SURFACE_AUTHORED)
+                            target->n[3] = (sint16)(target->n[3] + 2 * surface);
+                        model->has_lighting |= (target->n[3] & 1) != 0;
                         memset(target->extra, 0, sizeof(target->extra));
                         if (variant == 2)
                         {
@@ -3574,6 +4200,7 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
         for (uint32 axis = 0; axis < 3; ++axis)
         {
             model->bounds_center.v[axis] = (lower.v[axis] + upper.v[axis]) * 0.5f;
+            model->bounds_half.v[axis] = (upper.v[axis] - lower.v[axis]) * 0.5f;
             model->bounds_radius += (upper.v[axis] - lower.v[axis]) * (upper.v[axis] - lower.v[axis]) * 0.25f;
         }
         model->bounds_radius = sqrtf(model->bounds_radius);
@@ -3590,6 +4217,46 @@ static HD_MODEL *create_model(const MODEL_RESOURCE *resource, const sint8 *visib
         model_lookup[bucket] = model;
     }
     ++hd_work.model_builds;
+    if (model->kind == 12 && visibility == NULL && variant == 0)
+    {
+        const VID_VERTEX16 *quad = vid_mesh_data_16(model->geometry);
+        XASSERT(quad != NULL && model->index_count >= 6);
+        uint32 peak = 0;
+        for (uint32 point = 0; point < 4; ++point)
+            for (uint32 channel = 0; channel < 3; ++channel)
+                if (quad[point].color[channel] > peak)
+                    peak = quad[point].color[channel];
+        // LEGACY FIX
+        // restore neutral PS1 modulation without changing the authored tint or gradient
+        model->emission_gain = peak != 0 && peak < 128 ? 128.0f / peak : 1.0f;
+        for (uint32 point = 0; point < 4; ++point)
+            for (uint32 axis = 0; axis < 3; ++axis)
+                model->emitter_center.v[axis] += quad[point].pos[axis] * 0.25f;
+        float sum[3] = {0};
+        for (uint32 range = 0; range < model->range_count; ++range)
+            if (model->ranges[range].source_texture != NULL)
+            {
+                HD_SOURCE_PIXELS pixels = hd_texture_source_pixels(model->ranges[range].source_texture);
+                if (pixels.colors != NULL)
+                {
+                    model->emission_ready = 1;
+                    for (uint32 pixel = 0; pixel < pixels.width * pixels.height; ++pixel)
+                    {
+                        uint16 word = pixels.colors[pixel];
+                        float r = (float)(word & 31), g = (float)((word >> 5) & 31), b = (float)((word >> 10) & 31);
+                        float weight = fmaxf(r, fmaxf(g, b));
+                        sum[0] += r * weight;
+                        sum[1] += g * weight;
+                        sum[2] += b * weight;
+                    }
+                }
+                break;
+            }
+        float maximum = fmaxf(sum[0], fmaxf(sum[1], sum[2]));
+        if (maximum > 0.0f)
+            for (uint32 channel = 0; channel < 3; ++channel)
+                model->emission[channel] = sum[channel] / maximum;
+    }
     return model;
 }
 
@@ -3618,8 +4285,8 @@ static void capture_projection(HD_MODEL_DRAW *draw, uint64 key)
         motion->generation = hd.motion_generation;
         motion->key = key;
     }
-    draw->projection[0] = motion->previous;
-    draw->projection[1] = sample;
+    draw->instance->projection[0] = motion->previous;
+    draw->instance->projection[1] = sample;
 }
 
 static void capture_draw_poses(HD_MODEL_DRAW *draw, HD_MODEL *model, sint32 view_geometry)
@@ -3635,18 +4302,16 @@ static void capture_draw_poses(HD_MODEL_DRAW *draw, HD_MODEL *model, sint32 view
     else
         key = capture_camera_pose();
     capture_projection(draw, key);
-    draw->poses.camera[0] = motion->previous;
-    draw->poses.camera[1] = motion->current;
-    draw->poses.relative = hd.object_relative;
-    draw->poses.view_geometry = view_geometry;
-    draw->poses.billboard = !view_geometry && model->visibility == NULL && model->kind >= 10;
-    draw->poses.source_transform = hd.transform;
+    draw->instance->poses.camera = retain_poses(&motion->previous, &motion->current);
+    draw->instance->poses.relative = hd.object_relative;
+    draw->instance->poses.view_geometry = view_geometry;
+    draw->instance->poses.billboard = !view_geometry && model->visibility == NULL && model->kind >= 10;
+    draw->instance->poses.source_transform = hd.transform;
     if (hd.wheel != NULL)
     {
-        draw->poses.wheel[0] = hd.wheel->previous;
-        draw->poses.wheel[1] = hd.wheel->current;
-        draw->poses.wheel_active = 1;
-        draw->poses.wheel_hub = hd.wheel_hub;
+        draw->instance->poses.wheel = (const HD_WHEEL_SAMPLE *)retain_history(&hd.wheel->previous, &hd.wheel->current, sizeof(hd.wheel->current), 1);
+        draw->instance->poses.wheel_active = 1;
+        draw->instance->poses.wheel_hub = hd.wheel_hub;
     }
     if (hd.actor >= 0)
         motion = &hd.car_motion[hd.view][hd.actor];
@@ -3661,17 +4326,16 @@ static void capture_draw_poses(HD_MODEL_DRAW *draw, HD_MODEL *model, sint32 view
     {
         VECTORF translation;
         identity.rotation.w = 1.0f;
-        draw->poses.object[0] = draw->poses.object[1] = identity;
-        draw->poses.relative = 0;
-        draw->poses.source_transform = hd.camera;
+        draw->instance->poses.object = retain_poses(&identity, &identity);
+        draw->instance->poses.relative = 0;
+        draw->instance->poses.source_transform = hd.camera;
         ApplyMatrixf(&hd.camera, &hd.camera_position, &translation);
-        draw->poses.source_transform.t[0] = -translation.vx;
-        draw->poses.source_transform.t[1] = -translation.vy;
-        draw->poses.source_transform.t[2] = -translation.vz;
+        draw->instance->poses.source_transform.t[0] = -translation.vx;
+        draw->instance->poses.source_transform.t[1] = -translation.vy;
+        draw->instance->poses.source_transform.t[2] = -translation.vz;
         return;
     }
-    draw->poses.object[0] = motion->previous;
-    draw->poses.object[1] = motion->current;
+    draw->instance->poses.object = retain_poses(&motion->previous, &motion->current);
 }
 
 static void capture_lighting(HD_MODEL_DRAW *draw)
@@ -3685,18 +4349,24 @@ static void capture_lighting(HD_MODEL_DRAW *draw)
         motion = &hd.car_lighting[hd.view][hd.actor >= 0 ? hd.actor : 14];
     else
         motion = &draw->model->lighting[hd.view];
-    QuatMatrixf(&draw->poses.object[1].rotation, &object);
+    QuatMatrixf(&draw->instance->poses.object[1].rotation, &object);
     IdentityMatrixf(&inverse);
     for (row = 0; row < 3; ++row)
         for (column = 0; column < 3; ++column)
             inverse.m[row][column] = object.m[column][row];
-    MulMatrix0f(&draw->light, &inverse, &sample.world);
-    matrix_from_native(&draw->color, &sample.color);
-    memcpy(sample.ambient, draw->ambient, sizeof(sample.ambient));
+    MulMatrix0f(&draw->instance->light, &inverse, &sample.world);
+    matrix_from_native(&draw->instance->color, &sample.color);
+    memcpy(sample.ambient, draw->instance->ambient, sizeof(sample.ambient));
     if (hd.light_override != NULL)
         sample = *hd.light_override;
     if (hd.race_frame && hd.actor >= 0 && hd.actor < HD_SHADOW_CARS && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
         car_lighting_field(&car_states[hd.actor], &sample);
+    if (hd.race_frame && hd.actor >= 0 && hd.actor < HD_SHADOW_CARS && local_lights.point_count != 0 && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+    {
+        HD_LIGHT_SAMPLE field;
+        if (car_lighting_field(&car_states[hd.actor], &field))
+            sample = field;
+    }
     if (motion->serial != hd.motion_serial || motion->generation != hd.motion_generation || motion->camera_key != camera_key)
     {
         if (motion->serial == 0 || motion->serial + 1 != hd.motion_serial || motion->generation != hd.motion_generation || motion->camera_key != camera_key)
@@ -3708,15 +4378,14 @@ static void capture_lighting(HD_MODEL_DRAW *draw)
         motion->generation = hd.motion_generation;
         motion->camera_key = camera_key;
     }
-    draw->lighting[0] = motion->previous;
-    draw->lighting[1] = sample;
-    draw->light_history = 1;
+    draw->instance->lighting[0] = motion->previous;
+    draw->instance->lighting[1] = sample;
+    draw->instance->light_history = 1;
 }
 
-static HD_MODEL_DRAW *reserve_model_draw(HD_MODEL *model, sint32 view_geometry)
+static HD_MODEL_DRAW *allocate_model_draw(void)
 {
     HD_MODEL_DRAW *draw;
-    uint32 row;
     if (hd.model_count == hd.model_capacity)
     {
         uint32 capacity = hd.model_capacity != 0 ? hd.model_capacity * 2 : 128;
@@ -3726,8 +4395,25 @@ static HD_MODEL_DRAW *reserve_model_draw(HD_MODEL *model, sint32 view_geometry)
         hd.model_capacity = capacity;
     }
     draw = &hd.model_draws[hd.model_count++];
+    return draw;
+}
+
+static HD_MODEL_DRAW *reserve_model_draw(HD_MODEL *model, sint32 view_geometry)
+{
+    uint32 row;
+    HD_MODEL_DRAW *draw = allocate_model_draw();
     memset(draw, 0, sizeof(*draw));
+    draw->instance = create_instance();
+    ++hd_work.instance_captures;
     draw->car_slot = hd.actor;
+    draw->surface = HD_SURFACE_AUTHORED;
+    if (hd.wheel != NULL)
+    {
+        if (!hd.wheel_hub)
+            draw->surface = HD_SURFACE_RUBBER;
+        else if (hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT)
+            draw->surface = HD_SURFACE_METAL;
+    }
     draw->image = track_image;
     draw->region_sampling = hd.race_frame && hd.actor < 0 && model->visibility == NULL;
     if (draw->image != NULL)
@@ -3737,14 +4423,19 @@ static HD_MODEL_DRAW *reserve_model_draw(HD_MODEL *model, sint32 view_geometry)
     {
         XASSERT(race_session.track < 40);
         memcpy(draw->fog_color, track_fog_colors[race_session.track], sizeof(draw->fog_color));
+        if (race_session.track == 22)
+        {
+            // daytime Moscow uses a neutral overcast haze
+            draw->fog_color[0] = 112; draw->fog_color[1] = 116; draw->fog_color[2] = 120;
+        }
         draw->fog_horizon = hd_track_horizon();
     }
     draw->model = model;
     ++model->draw_refs;
     capture_draw_poses(draw, model, view_geometry);
-    draw->transform = hd.transform;
-    draw->light = hd.light;
-    draw->color = model_render.color;
+    draw->instance->transform = hd.transform;
+    draw->instance->light = hd.light;
+    draw->instance->color = model_render.color;
     draw->view = hd.view;
     draw->focal = (float)model_render.proj_distance;
     draw->scale_x = model_render.x_scale / 4096.0f * model_render.scale / 4096.0f;
@@ -3753,7 +4444,7 @@ static HD_MODEL_DRAW *reserve_model_draw(HD_MODEL *model, sint32 view_geometry)
     draw->center_y = (float)(sint32)model_render.view_center_y;
     draw->far_plane = hd_far_plane();
     for (row = 0; row < 3; ++row)
-        draw->ambient[row] = hd.ambient[row];
+        draw->instance->ambient[row] = hd.ambient[row];
     if (!view_geometry && model->visibility == NULL && model->variant == 0 && (model->kind == 1 || model->kind == 3 || model->kind == 9))
         capture_lighting(draw);
     return draw;
@@ -3824,7 +4515,7 @@ void hd_police_light(uint32 index, const SVECTOR *anchor, const HD_TEXTURE *text
         motion->ray_flags[0] = ray_flags[0];
         motion->ray_flags[1] = ray_flags[1];
     }
-    draw->dynamic = 4;
+    draw->kind = HD_COMMAND_POLICE;
     draw->blend = (texture->flags & HD_SEMITRANSPARENT) != 0 || ray_flags[0] != 0 || ray_flags[1] != 0 ? 1 + ((texture->page >> 5) & 3) : 0;
     draw->police.samples[0] = motion->previous;
     draw->police.samples[1] = sample;
@@ -3934,11 +4625,11 @@ static void capture_facing(HD_MODEL_DRAW *draw)
 {
     HD_POSE facing = {0};
     HD_MOTION *motion = &draw->model->facing[hd.view];
-    MatrixQuatf(&draw->transform, &facing.rotation);
+    MatrixQuatf(&draw->instance->transform, &facing.rotation);
     NormalizeQuatf(&facing.rotation, &facing.rotation);
     motion_update(motion, &facing, hd.camera_motion[hd.view].key);
-    draw->poses.facing[0] = motion->previous.rotation;
-    draw->poses.facing[1] = motion->current.rotation;
+    draw->instance->poses.facing[0] = motion->previous.rotation;
+    draw->instance->poses.facing[1] = motion->current.rotation;
 }
 
 static void draw_sun(HD_MODEL_DRAW *draw, sint32 emit_flares)
@@ -3946,25 +4637,25 @@ static void draw_sun(HD_MODEL_DRAW *draw, sint32 emit_flares)
     const VID_VERTEX16 *source = vid_mesh_data_16(draw->model->geometry);
     MATRIXF radial, rotation;
     HD_SUN_ATTACHMENT attachment = {0};
-    float angle = atan2f(draw->transform.t[1], draw->transform.t[0]);
+    float angle = atan2f(draw->instance->transform.t[1], draw->instance->transform.t[0]);
     uint32 point, flare;
     XASSERT(draw->model->index_count >= 6);
     IdentityMatrixf(&radial);
     RotMatrixZf(angle, &radial);
     MulMatrix0f(&hd.billboard, &radial, &rotation);
-    memcpy(draw->transform.m, rotation.m, sizeof(rotation.m));
-    draw->dynamic = 2;
+    memcpy(draw->instance->transform.m, rotation.m, sizeof(rotation.m));
+    draw->kind = HD_COMMAND_SOLID;
     draw->first = 0;
     draw->count = 6;
     draw->blend = draw->model->ranges[0].blend;
     capture_facing(draw);
     if (!emit_flares || !hd.flares_valid)
         return;
-    memcpy(attachment.camera, draw->poses.camera, sizeof(attachment.camera));
-    memcpy(attachment.object, draw->poses.object, sizeof(attachment.object));
-    memcpy(attachment.facing, draw->poses.facing, sizeof(attachment.facing));
-    memcpy(attachment.projection, draw->projection, sizeof(attachment.projection));
-    attachment.relative = draw->poses.relative;
+    memcpy(attachment.camera, draw->instance->poses.camera, sizeof(attachment.camera));
+    memcpy(attachment.object, draw->instance->poses.object, sizeof(attachment.object));
+    memcpy(attachment.facing, draw->instance->poses.facing, sizeof(attachment.facing));
+    memcpy(attachment.projection, draw->instance->projection, sizeof(attachment.projection));
+    attachment.relative = draw->instance->poses.relative;
     attachment.half_width = model_render.width * 0.5f;
     attachment.half_height = model_render.height * 0.5f;
     attachment.depth_scale = (float)(1u << (model_render.coord_shift & 31));
@@ -4031,6 +4722,7 @@ static HD_SOURCE_MATERIAL *source_material(VID_TEXTURE *texture, uint32 pass, ui
     data = vid_mat_data(entry->material);
     data->texture = texture;
     data->shader = object_texture_shader;
+    data->surface_write = 0;
     data->filter = VID_FILTER_ANISOTROPIC;
     data->cull = cull;
     data->depth_test = 1;
@@ -4049,6 +4741,7 @@ static HD_SOURCE_MATERIAL *source_material(VID_TEXTURE *texture, uint32 pass, ui
     data = vid_mat_data(entry->batch_material);
     *data = entry->data;
     data->shader = scene_batch_shader;
+    data->surface_write = 0;
     vid_mat_commit(entry->batch_material);
     entry->next = source_materials;
     source_materials = entry;
@@ -4057,7 +4750,7 @@ static HD_SOURCE_MATERIAL *source_material(VID_TEXTURE *texture, uint32 pass, ui
 
 static void warm_source_bank(VID_TEXTURE *texture, void *geometry)
 {
-    shadow_pass(source_material(texture, 0, 0, 0)->material);
+    bind_scene_material(source_material(texture, 0, 0, 0)->material);
     vid_submit((VID_GEOMETRY *)geometry, NULL, 0, 3);
 }
 
@@ -4155,6 +4848,9 @@ static void static_pools_free(void)
         static_pools = pool->next;
         vid_mesh_free(pool->geometry);
         vid_index_free(pool->indices);
+        vid_index_free(pool->depth_indices);
+        for (uint32 group = 0; group < pool->group_count; ++group)
+            vid_mat_free(pool->groups[group].depth_material);
         free(pool->groups);
         free(pool);
     }
@@ -4176,9 +4872,162 @@ static void batch_bounds_add(HD_SCENE_BATCH_GROUP *batch, VEC3F position, float 
     batch->bounds_valid = 1;
 }
 
-void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count)
+static sint32 billboard_caster(const HD_MODEL *model)
 {
+    return model != NULL && model->source_ready && !model->billboard_shadow_prepared && (model->kind == 10 || model->kind == 11 || model->kind == 13);
+}
+
+static void prepare_billboard_shadow_pool(HD_MODEL *const *models, uint32 count, uint32 main_count, uint32 section)
+{
+    if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+        return;
+    uint32 vertex_count = 0, index_count = 0, maximum_groups = 0;
+    for (uint32 item = 0; item < count; ++item)
+        if (billboard_caster(models[item]))
+        {
+            vertex_count += models[item]->batch_vertex_count;
+            index_count += models[item]->index_count;
+            maximum_groups += models[item]->source_group_count;
+        }
+    if (vertex_count == 0)
+        return;
+    prepare_environment_shadow();
+    HD_STATIC_POOL *pool = calloc(1, sizeof(*pool));
+    XASSERT(pool != NULL);
+    pool->billboard = 1;
+    pool->track_section = section;
+    pool->groups = calloc(maximum_groups, sizeof(*pool->groups));
+    pool->geometry = vid_mesh_create_3d(vertex_count);
+    pool->depth_indices = vid_index_create(index_count);
+    XASSERT(pool->groups && pool->geometry && pool->depth_indices);
+    VID_VERTEX3D *vertices = vid_mesh_data_3d(pool->geometry);
+    uint32 *indices = vid_index_data(pool->depth_indices);
+    uint32 *offsets = calloc(count, sizeof(*offsets));
+    XASSERT(offsets != NULL);
+    uint32 vertex_at = 0;
+    for (uint32 item = 0; item < count; ++item)
+    {
+        HD_MODEL *model = models[item];
+        if (!billboard_caster(model))
+            continue;
+        const MODEL_HEADER *header = (const MODEL_HEADER *)model->source;
+        VEC3F anchor;
+        for (uint32 axis = 0; axis < 3; ++axis)
+            anchor.v[axis] = header->position.v[axis] / 256.0f;
+        if (vertex_at == 0)
+            pool->origin = static_pools != NULL ? static_pools->origin : (VEC3F){floorf(anchor.x / 1024) * 1024, floorf(anchor.y / 1024) * 1024, floorf(anchor.z / 1024) * 1024};
+        offsets[item] = vertex_at;
+        for (uint32 vertex = 0; vertex < model->batch_vertex_count; ++vertex)
+        {
+            const VID_VERTEX3D *source = &model->batch_vertices[vertex];
+            VID_VERTEX3D *target = &vertices[vertex_at++];
+            *target = *source;
+            // retain local vertices and anchors for the shared camera-facing basis
+            target->n[0] = anchor.x - pool->origin.x;
+            target->n[1] = anchor.y - pool->origin.y;
+            target->n[2] = anchor.z - pool->origin.z;
+            target->n[3] = 0.0f;
+        }
+        for (uint32 source = 0; source < model->source_group_count; ++source)
+        {
+            const HD_CACHED_GROUP *part = &model->source_groups[source];
+            uint32 group;
+            for (group = 0; group < pool->group_count; ++group)
+                if (pool->groups[group].batch.texture == part->texture && pool->groups[group].category == (item >= main_count))
+                    break;
+            if (group == pool->group_count)
+            {
+                pool->groups[group].category = item >= main_count;
+                pool->groups[pool->group_count++].batch.texture = part->texture;
+            }
+            pool->groups[group].depth_count += part->count;
+        }
+    }
+    uint32 index_at = 0;
+    for (uint32 group = 0; group < pool->group_count; ++group)
+    {
+        HD_STATIC_GROUP *part = &pool->groups[group];
+        part->depth_first = part->cursor = index_at;
+        index_at += part->depth_count;
+        part->depth_material = vid_mat_create();
+        XASSERT(part->depth_material != NULL);
+        VID_MATERIAL_DATA *data = vid_mat_data(part->depth_material);
+        data->shader = environment_shadow.billboard_shader;
+        data->cull = 0;
+        data->texture = part->batch.texture;
+        data->depth_test = data->depth_write = 1;
+        data->filter = VID_FILTER_NEAREST;
+        uint32 width, height;
+        hd_texture_source_bank_size(data->texture, &width, &height);
+        data->params[4] = (float)width;
+        data->params[5] = (float)height;
+        vid_mat_commit(part->depth_material);
+    }
+    XASSERT(vertex_at == vertex_count && index_at == index_count);
+    for (uint32 item = 0; item < count; ++item)
+    {
+        const HD_MODEL *model = models[item];
+        if (!billboard_caster(model))
+            continue;
+        for (uint32 range = 0; range < model->range_count; ++range)
+        {
+            const HD_MODEL_RANGE *part = &model->ranges[range];
+            HD_SOURCE_GPU source = hd_texture_source_gpu(part->source_texture);
+            HD_STATIC_GROUP *group = NULL;
+            for (uint32 slot = 0; slot < pool->group_count; ++slot)
+                if (pool->groups[slot].batch.texture == source.texture && pool->groups[slot].category == (item >= main_count))
+                    group = &pool->groups[slot];
+            XASSERT(group != NULL);
+            for (uint32 index = 0; index < part->count; ++index)
+            {
+                uint32 vertex = offsets[item] + model->batch_source_indices[part->source_first + index];
+                indices[group->cursor++] = vertex;
+                VEC3F position;
+                memcpy(&position, vertices[vertex].n, sizeof(position));
+                const float *local = vertices[vertex].pos;
+                batch_bounds_add(&group->batch, position, sqrtf(local[0] * local[0] + local[1] * local[1] + local[2] * local[2]));
+            }
+        }
+    }
+    for (uint32 group = 0; group < pool->group_count; ++group)
+        XASSERT(pool->groups[group].cursor == pool->groups[group].depth_first + pool->groups[group].depth_count);
+    for (uint32 item = 0; item < count; ++item)
+        if (billboard_caster(models[item]))
+            models[item]->billboard_shadow_prepared = 1;
+    free(offsets);
+    vid_mesh_commit(pool->geometry);
+    vid_index_commit(pool->depth_indices, index_count);
+    vid_mesh_static(pool->geometry);
+    vid_index_static(pool->depth_indices);
+    environment_shadow.billboard_vertices += vertex_count;
+    environment_shadow.billboard_indices += index_count;
+    if (preparation_active)
+    {
+        float empty[3][4] = {{0}};
+        vid_uniforms(&empty[0][0], 3);
+        for (uint32 group = 0; group < pool->group_count; ++group)
+        {
+            const HD_STATIC_GROUP *part = &pool->groups[group];
+            vid_pass(part->depth_material);
+            vid_submit(pool->geometry, pool->depth_indices, part->depth_first, part->depth_count);
+        }
+        vid_uniforms(NULL, 0);
+    }
+    pool->next = static_pools;
+    static_pools = pool;
+    ++static_pool_generation;
+}
+
+static void register_track_lamps(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count, uint32 section);
+
+void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count, uint32 section)
+{
+    register_track_lamps(models, count, main_count, section);
+    prepare_billboard_shadow_pool(models, count, main_count, section);
     HD_STATIC_POOL *pool;
+    HD_STATIC_POOL *world_origin = static_pools;
+    while (world_origin != NULL && world_origin->billboard)
+        world_origin = world_origin->next;
     VID_VERTEX3D *vertices;
     uint32 *indices, *offsets;
     uint32 item, total_vertices = 0, total_indices = 0, maximum_groups = 0, group, cursor = 0;
@@ -4193,7 +5042,10 @@ void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, u
     }
     if (total_vertices == 0)
         return;
+    prepare_environment_shadow();
     pool = (HD_STATIC_POOL *)calloc(1, sizeof(*pool));
+    XASSERT(pool != NULL);
+    pool->track_section = section;
     offsets = (uint32 *)calloc(count, sizeof(*offsets));
     XASSERT(pool != NULL && offsets != NULL);
     pool->groups = (HD_STATIC_GROUP *)calloc(maximum_groups, sizeof(*pool->groups));
@@ -4214,7 +5066,7 @@ void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, u
         for (vertex = 0; vertex < 3; ++vertex)
             position[vertex] = (float)(header->position.v[vertex] >> 8);
         if (cursor == 0)
-            pool->origin = static_pools != NULL ? static_pools->origin : (VEC3F){floorf(position[0] / 1024) * 1024, floorf(position[1] / 1024) * 1024, floorf(position[2] / 1024) * 1024};
+            pool->origin = world_origin != NULL ? world_origin->origin : (VEC3F){floorf(position[0] / 1024) * 1024, floorf(position[1] / 1024) * 1024, floorf(position[2] / 1024) * 1024};
         offsets[item] = cursor;
         memcpy(vertices + cursor, model->batch_vertices, model->batch_vertex_count * sizeof(*vertices));
         for (vertex = 0; vertex < model->batch_vertex_count; ++vertex)
@@ -4297,6 +5149,51 @@ void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, u
     }
     for (group = 0; group < pool->group_count; ++group)
         XASSERT(pool->groups[group].cursor == pool->groups[group].batch.first + pool->groups[group].batch.count);
+    for (group = 0; group < pool->group_count; ++group)
+    {
+        HD_STATIC_GROUP *part = &pool->groups[group];
+        VID_MATERIAL_DATA *data;
+        if (environment_shadow.target == NULL)
+            continue;
+        part->depth_material = vid_mat_create();
+        XASSERT(part->depth_material != NULL);
+        data = vid_mat_data(part->depth_material);
+        data->shader = environment_shadow.shader;
+        data->texture = part->batch.texture;
+        data->filter = VID_FILTER_NEAREST;
+        data->depth_test = data->depth_write = 1;
+        // authored environment walls and tunnel ceilings may be one-sided
+        data->cull = 0;
+        data->params[4] = vid_mat_data(part->batch.material)->params[4];
+        data->params[5] = vid_mat_data(part->batch.material)->params[5];
+        vid_mat_commit(part->depth_material);
+    }
+    if (environment_shadow.target != NULL)
+    {
+        pool->depth_indices = vid_index_create(total_indices);
+        XASSERT(pool->depth_indices != NULL);
+        uint32 *depth = vid_index_data(pool->depth_indices), at = 0;
+        for (group = 0; group < pool->group_count; ++group)
+        {
+            HD_STATIC_GROUP *part = &pool->groups[group];
+            part->depth_first = at;
+            for (uint32 index = 0; index < part->batch.count; index += 3)
+            {
+                uint32 first = part->batch.first + index;
+                uint32 road = 1;
+                for (uint32 corner = 0; corner < 3; ++corner)
+                    road &= ((uint32)vertices[indices[first + corner]].n[3] >> 1) == HD_SURFACE_ROAD;
+                if (road)
+                    continue;
+                memcpy(depth + at, indices + first, 3 * sizeof(*depth));
+                at += 3;
+            }
+            part->depth_count = at - part->depth_first;
+        }
+        // share vertex storage while excluding actual driving surfaces from depth
+        vid_index_commit(pool->depth_indices, at);
+        vid_index_static(pool->depth_indices);
+    }
     free(offsets);
     vid_mesh_commit(pool->geometry);
     vid_index_commit(pool->indices, total_indices);
@@ -4306,35 +5203,43 @@ void hd_prepare_track_geometry(HD_PREPARED_MODEL *const *models, uint32 count, u
         for (group = 0; group < pool->group_count; ++group)
         {
             HD_SCENE_BATCH_GROUP *batch = &pool->groups[group].batch;
-            shadow_pass(batch->material);
+            bind_scene_material(batch->material);
             vid_submit(pool->geometry, pool->indices, batch->first, batch->count);
         }
     pool->next = static_pools;
     static_pools = pool;
+    ++static_pool_generation;
 }
 
 static void draw_model_snapshot(HD_MODEL *model)
 {
-    uint32 group, count = model->uses_sources ? model->source_group_count + (model->has_transparent != 0) : 1;
+    uint32 count = model->uses_sources ? model->source_group_count + (model->has_transparent != 0) : 1;
     XASSERT(!model->uses_sources || model->source_ready);
-    for (group = 0; group < count; ++group)
+    uint32 first = hd.model_count;
+    for (uint32 group = 0; group < count; ++group)
     {
-        HD_MODEL_DRAW *draw = reserve_model_draw(model, 0);
+        HD_MODEL_DRAW *draw;
+        if (group == 0) draw = reserve_model_draw(model, 0);
+        else
+        {
+            draw = allocate_model_draw();
+            *draw = hd.model_draws[first];
+            ++draw->instance->refs; ++model->draw_refs;
+            ++hd_work.instance_aliases;
+            if (draw->image) ++draw->image->refs;
+        }
         if (model->uses_sources)
         {
             draw->source_order = group < model->source_group_count ? 1 : 2;
-            if (draw->source_order == 1)
-            {
-                draw->source_group = &model->source_groups[group];
-                draw->texture_transparent = (uint8)draw->source_group->transparent;
-            }
+            draw->source_group = draw->source_order == 1 ? &model->source_groups[group] : NULL;
+            draw->texture_transparent = draw->source_group ? (uint8)draw->source_group->transparent : 0;
         }
-        if (model->visibility == NULL && model->kind >= 10)
-            memcpy(draw->transform.m, hd.billboard.m, sizeof(draw->transform.m));
-        if (model->visibility == NULL && model->kind == 12)
-            draw_sun(draw, group == 0);
-        else if (model->visibility == NULL && model->kind >= 10)
-            capture_facing(draw);
+        if (group == 0 && model->visibility == NULL && model->kind >= 10)
+        {
+            memcpy(draw->instance->transform.m, hd.billboard.m, sizeof(draw->instance->transform.m));
+            if (model->kind == 12) draw_sun(draw, 1);
+            else capture_facing(draw);
+        }
     }
 }
 
@@ -4371,10 +5276,10 @@ void hd_draw_model(const MODEL_RESOURCE *resource)
 {
     if (original_track_suppressed)
         return;
-    if (hd_capture_active() && hd.collecting && hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT && (uint32)hd.actor != race_view.primary_car)
+    if (hd_capture_active() && hd.collecting && hd.race_frame && hd.actor >= 0 && hd.actor < CAR_RACE_MODEL_COUNT && ((uint32)hd.actor != race_view.primary_car || (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0))
     {
         const CAR_STATE *car = &car_states[hd.actor];
-        if ((resource->bytes == car->render_models[0].bytes || resource->bytes == car->render_models[1].bytes) && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
+        if ((resource->bytes == car->render_models[0].bytes || resource->bytes == car->render_models[1].bytes))
             car_environment_candidate(high_detail_car_resource(resource), &car_states[race_view.primary_car]);
     }
     draw_model(resource, NULL);
@@ -4606,6 +5511,9 @@ static sint32 car_lighting_field(const CAR_STATE *car, HD_LIGHT_SAMPLE *field)
         lighting_boundary(car, index, &zone, at - zone.first >= 3, 2048.0f, field);
         return 1;
     }
+    // spatial lights replace only the interior point-light contribution
+    if (local_lights.point_count != 0)
+        return 1;
     XASSERT(zone.step != 0);
     rounded = ((at - zone.lamp_origin + zone.step / 2) / zone.step) * zone.step + zone.lamp_origin;
     for (light = 0; light < (zone.kind == 1 ? 2u : 3u); ++light)
@@ -4654,6 +5562,134 @@ static sint32 car_lighting_field(const CAR_STATE *car, HD_LIGHT_SAMPLE *field)
     return 1;
 }
 
+static uint32 light_cell(float x, float z)
+{
+    return ((uint32)(sint32)floorf(x / 2048.0f) & (HD_LIGHT_CELL_AXIS - 1)) + (((uint32)(sint32)floorf(z / 2048.0f) & (HD_LIGHT_CELL_AXIS - 1)) * HD_LIGHT_CELL_AXIS);
+}
+
+static void prepare_authored_lights(void)
+{
+    local_lights.point_count = 0;
+    local_lights.occupied_count = 0;
+    local_lights.rejected_points = 0;
+    memset(local_lights.cells, 0xFF, sizeof(local_lights.cells));
+    if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0 || track_geometry.main_node_count == 0 || track_geometry.vertex_count == 0)
+        return;
+    for (uint32 index = 0; index < car_lighting_zones.count; ++index)
+    {
+        HD_LIGHT_ZONE zone = lighting_zone(index);
+        if ((zone.kind != 1 && zone.kind != 2) || zone.step == 0 || (zone.kind == 2 && zone.selector >= 3) || (zone.color[0] | zone.color[1] | zone.color[2]) == 0)
+            continue;
+        sint32 first = ((zone.first - zone.lamp_origin + zone.step / 2) / zone.step) * zone.step + zone.lamp_origin;
+        sint32 last = ((zone.last - zone.lamp_origin + zone.step / 2) / zone.step) * zone.step + zone.lamp_origin;
+        if (zone.kind == 2)
+        {
+            first -= zone.step;
+            last += zone.step;
+        }
+        for (sint32 node_index = first; node_index <= last; node_index += zone.step)
+        {
+            HD_LIGHT_NODE node = lighting_node(node_index, 1);
+            if (((zone.kind == 1 || zone.selector != 1) && node.first >= track_geometry.vertex_count) || (zone.kind == 1 && (uint32)(node.lane & 15) >= track_geometry.vertex_count - node.first) || (zone.kind == 2 && zone.selector != 0 && (node.last == 0 || node.last > track_geometry.vertex_count)))
+            {
+                ++local_lights.rejected_points;
+                continue;
+            }
+            for (uint32 side = 0; side < (zone.kind == 1 ? 2u : 1u); ++side)
+            {
+                VECTORF position;
+                if (zone.kind == 1)
+                    position = lighting_point(&node, node.first + (side == 0 ? 0 : node.lane & 15));
+                else if (zone.selector == 1)
+                {
+                    XASSERT(node.last != 0);
+                    position = lighting_point(&node, node.last - 1);
+                }
+                else
+                {
+                    position = lighting_point(&node, node.first);
+                    if (zone.selector == 2)
+                    {
+                        XASSERT(node.last != 0);
+                        VECTORF other = lighting_point(&node, node.last - 1);
+                        position.vx = (position.vx + other.vx) * 0.5f;
+                        position.vy = (position.vy + other.vy) * 0.5f;
+                        position.vz = (position.vz + other.vz) * 0.5f;
+                    }
+                }
+                // match the original point-to-car direction with its authored height
+                position.vy += zone.height;
+                uint32 cell = light_cell(position.vx, position.vz);
+                sint32 found = local_lights.cells[cell];
+                while (found >= 0)
+                {
+                    const VECTORF *other = &local_lights.points[found].position;
+                    if (fabsf(lighting_delta(position.vx - other->vx)) + fabsf(lighting_delta(position.vy - other->vy)) + fabsf(lighting_delta(position.vz - other->vz)) < 1.0f)
+                        break;
+                    found = local_lights.points[found].next;
+                }
+                if (found >= 0)
+                    continue;
+                if (local_lights.point_count == local_lights.point_capacity)
+                {
+                    local_lights.point_capacity = local_lights.point_capacity != 0 ? local_lights.point_capacity * 2 : 128;
+                    local_lights.points = (HD_POINT_LIGHT *)realloc(local_lights.points, local_lights.point_capacity * sizeof(*local_lights.points));
+                    XASSERT(local_lights.points != NULL);
+                }
+                HD_POINT_LIGHT *point = &local_lights.points[local_lights.point_count];
+                memset(point, 0, sizeof(*point));
+                point->position = position;
+                point->radius = zone.attenuation != 0 ? fminf(5200.0f, sqrtf(67108864.0f / zone.attenuation)) : 5200.0f;
+                for (uint32 channel = 0; channel < 3; ++channel)
+                    point->color[channel] = zone.color[channel] / 128.0f;
+                if (local_lights.cells[cell] < 0)
+                    local_lights.occupied_cells[local_lights.occupied_count++] = (uint16)cell;
+                point->next = local_lights.cells[cell];
+                local_lights.cells[cell] = (sint32)local_lights.point_count++;
+            }
+        }
+    }
+}
+
+static void register_track_lamps(HD_PREPARED_MODEL *const *models, uint32 count, uint32 main_count, uint32 section)
+{
+    for (uint32 item = 0; item < count; ++item)
+    {
+        const HD_MODEL *model = models[item];
+        if (model == NULL || model->kind != 12 || !model->emission_ready)
+            continue;
+        const MODEL_HEADER *header = (const MODEL_HEADER *)model->source;
+        VECTORF position = {header->position.x / 256.0f, header->position.y / 256.0f, header->position.z / 256.0f};
+        uint32 cell = light_cell(position.vx, position.vz), duplicate = 0;
+        for (sint32 other = local_lights.cells[cell]; other >= 0; other = local_lights.points[other].next)
+        {
+            const HD_POINT_LIGHT *point = &local_lights.points[other];
+            if (point->lamp && point->section == section && point->category == (item < main_count ? 1u : 2u) &&
+                fabsf(point->position.vx - position.vx) + fabsf(point->position.vy - position.vy) + fabsf(point->position.vz - position.vz) < 1.0f)
+                duplicate = 1;
+        }
+        if (duplicate)
+            continue;
+        if (local_lights.point_count == local_lights.point_capacity)
+        {
+            local_lights.point_capacity = local_lights.point_capacity ? local_lights.point_capacity * 2 : 256;
+            local_lights.points = (HD_POINT_LIGHT *)realloc(local_lights.points, local_lights.point_capacity * sizeof(*local_lights.points));
+            XASSERT(local_lights.points != NULL);
+        }
+        HD_POINT_LIGHT *point = &local_lights.points[local_lights.point_count];
+        memset(point, 0, sizeof(*point));
+        point->position = position;
+        memcpy(point->color, model->emission, sizeof(point->color));
+        point->lamp = 1;
+        point->section = section;
+        point->category = item < main_count ? 1 : 2;
+        if (local_lights.cells[cell] < 0)
+            local_lights.occupied_cells[local_lights.occupied_count++] = (uint16)cell;
+        point->next = local_lights.cells[cell];
+        local_lights.cells[cell] = (sint32)local_lights.point_count++;
+    }
+}
+
 void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *resource, HD_CAR_FAMILY family)
 {
     const CAR_STATE *car;
@@ -4700,7 +5736,7 @@ void hd_draw_car_candidate(uint32 slot, const MODEL_RESOURCE *resource, HD_CAR_F
             memcpy(hd.ambient, field.ambient, sizeof(hd.ambient));
             hd.light_override = &field;
         }
-        if (family != HD_CAR_TRAFFIC && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
+        if (family != HD_CAR_TRAFFIC)
             car_environment_candidate(resource, family == HD_CAR_PRIMARY ? car : &car_states[race_view.primary_car]);
         draw_model(resource, NULL);
         if (family == HD_CAR_RACING || (family == HD_CAR_SPLIT && race_session.multiplayer_mode == 3 && slot != chase_state.pursuer_slot))
@@ -4734,9 +5770,12 @@ static HD_MODEL_DRAW *environment_draw(const MODEL_RESOURCE *resource, uint32 va
         model = create_model(resource, NULL, variant);
     if (model == NULL)
         return NULL;
-    memcpy(&texture, car_environment_render.tex, sizeof(texture));
+    // racing cubemaps do not depend on the daytime PS1 environment image
+    memset(&texture, 0, sizeof(texture));
+    if (!hd.race_frame || hd.actor < 0 || hd.actor >= CAR_RACE_MODEL_COUNT)
+        memcpy(&texture, car_environment_render.tex, sizeof(texture));
     draw = reserve_model_draw(model, 0);
-    draw->dynamic = 3;
+    draw->kind = HD_COMMAND_REFLECTION;
     draw->first = 0;
     draw->count = model->index_count;
     draw->blend = 1 + ((texture.page >> 5) & 3);
@@ -5044,16 +6083,16 @@ void hd_world_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGB
     if (!view_space && actor >= 0)
     {
         const HD_MOTION *motion = &hd.car_motion[hd.view][actor];
-        draw->poses.object[0] = motion->previous;
-        draw->poses.object[1] = motion->current;
-        draw->poses.world_translation = 1;
+        release_history(draw->instance->poses.object);
+        draw->instance->poses.object = retain_poses(&motion->previous, &motion->current);
+        draw->instance->poses.world_translation = 1;
     }
-    IdentityMatrixf(&draw->transform);
+    IdentityMatrixf(&draw->instance->transform);
     draw->first = mesh->used;
     draw->depth_offset = (texture->flags & HD_LAMP_GLOW) != 0 ? 160.0f : 0.0f;
     draw->count = 6;
     draw->blend = (texture->flags & HD_SEMITRANSPARENT) != 0 ? 1 + ((texture->page >> 5) & 3) : 0;
-    draw->dynamic = 1;
+    draw->kind = HD_COMMAND_EFFECT;
     if (sprite != NULL)
         draw->quad_texture = *texture;
     mesh->used += 6;
@@ -5124,7 +6163,7 @@ void hd_solid_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGB
     uint32 before = hd.model_count;
     hd_world_quad(points, texture, colors, view_space);
     if (hd.model_count != before)
-        hd.model_draws[hd.model_count - 1].dynamic = 2;
+        hd.model_draws[hd.model_count - 1].kind = HD_COMMAND_SOLID;
 }
 
 void hd_road_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC colors[4])
@@ -5138,6 +6177,17 @@ void hd_road_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC
         // retain the original lamp projection's sixteen-OTZ foreground offset
         draw->depth_offset = 64.0f * (float)(1u << (model_render.coord_shift & 31));
     }
+}
+
+sint32 hd_wheel_sides(uint32 slot)
+{
+    if (!hd_capture_active() || !hd.collecting || !hd.race_frame || slot >= CAR_RACE_MODEL_COUNT || tyre_models[slot].geometry == NULL)
+        return 0;
+    HD_MODEL_DRAW *draw = reserve_model_draw(&tyre_models[slot], 0);
+    draw->instance->poses.local_wheel_geometry = 1;
+    draw->kind = HD_COMMAND_SOLID;
+    draw->count = tyre_models[slot].index_count;
+    return 1;
 }
 
 void hd_lit_wheel_quad(const VECTORF points[4], const HD_TEXTURE *texture, const RGBC colors[4], const SVECTOR *normal)
@@ -5182,8 +6232,8 @@ static void draw_world_billboard(const VECTORF *position, float size, const HD_T
     hd.actor = -1;
     hd_world_quad(points, texture, colors, 1);
     hd.actor = actor;
-    hd.model_draws[hd.model_count - 1].poses.centered_billboard = 1;
-    hd.model_draws[hd.model_count - 1].poses.center = (VECTORF){position->vx, position->vy, position->vz};
+    hd.model_draws[hd.model_count - 1].instance->poses.centered_billboard = 1;
+    hd.model_draws[hd.model_count - 1].instance->poses.center = (VECTORF){position->vx, position->vy, position->vz};
 }
 
 void hd_world_billboard(const VEC3 *position, float size, const HD_TEXTURE *texture, const RGBC *color)
@@ -5229,7 +6279,8 @@ void hd_particle_billboard(uint32 slot, const VEC3 *position, float size, const 
     motion->color = *color;
     motion->screen = 0;
     hd_world_billboard(position, size, texture, color);
-    poses = &hd.model_draws[hd.model_count - 1].poses;
+    poses = &hd.model_draws[hd.model_count - 1].instance->poses;
+    XASSERT(!poses->wheel_active && !poses->line_active);
     poses->particle[0] = motion->previous;
     poses->particle[1] = motion->current;
     poses->particle_active = 1;
@@ -5416,7 +6467,7 @@ static void quad_draw(HD_MODEL *model, const HD_QUAD_SAMPLE *previous, const HD_
     hd.actor = -1;
     draw = reserve_model_draw(model, 1);
     hd.actor = actor;
-    draw->dynamic = 1;
+    draw->kind = HD_COMMAND_EFFECT;
     draw->count = 6;
     draw->blend = (texture->flags & HD_SEMITRANSPARENT) != 0 ? 1 + ((texture->page >> 5) & 3) : 0;
     draw->quad[0] = *previous;
@@ -5550,16 +6601,17 @@ void hd_effect_line(uint32 slot, const VEC3 points[2], const RGBC colors[2], uin
     hd.actor = -1;
     draw = reserve_model_draw(&line->model, 1);
     hd.actor = actor;
-    draw->dynamic = 1;
+    draw->kind = HD_COMMAND_EFFECT;
     draw->first = 0;
     draw->count = 6;
     draw->blend = semi ? 1 + ((page >> 5) & 3) : 0;
     line->blend = draw->blend;
     memcpy(line->colors, colors, sizeof(line->colors));
-    draw->poses.line_active = 1;
-    memcpy(draw->poses.line[0], line->previous, sizeof(line->previous));
-    memcpy(draw->poses.line[1], line->current, sizeof(line->current));
-    memcpy(draw->poses.line_colors, colors, sizeof(draw->poses.line_colors));
+    XASSERT(!draw->instance->poses.wheel_active && !draw->instance->poses.particle_active);
+    draw->instance->poses.line_active = 1;
+    memcpy(draw->instance->poses.line[0], line->previous, sizeof(line->previous));
+    memcpy(draw->instance->poses.line[1], line->current, sizeof(line->current));
+    memcpy(draw->instance->poses.line_colors, colors, sizeof(draw->instance->poses.line_colors));
 }
 
 void hd_effects_begin(void)
@@ -5582,8 +6634,8 @@ void hd_effects_begin(void)
         {
             draw_world_billboard(&retired->particle[1].position, retired->particle[1].size, &retired->texture, &retired->color);
             draw = &hd.model_draws[hd.model_count - 1];
-            memcpy(draw->poses.particle, retired->particle, sizeof(retired->particle));
-            draw->poses.particle_active = 1;
+            memcpy(draw->instance->poses.particle, retired->particle, sizeof(retired->particle));
+            draw->instance->poses.particle_active = 1;
             draw->fading_out = 1;
         }
         else if (retired->kind == 2)
@@ -5595,12 +6647,12 @@ void hd_effects_begin(void)
             hd.actor = -1;
             draw = reserve_model_draw(&retired->line_model, 1);
             hd.actor = actor;
-            draw->dynamic = 1;
+            draw->kind = HD_COMMAND_EFFECT;
             draw->count = 6;
             draw->blend = retired->blend;
-            memcpy(draw->poses.line, retired->line, sizeof(retired->line));
-            memcpy(draw->poses.line_colors, retired->line_colors, sizeof(retired->line_colors));
-            draw->poses.line_active = 1;
+            memcpy(draw->instance->poses.line, retired->line, sizeof(retired->line));
+            memcpy(draw->instance->poses.line_colors, retired->line_colors, sizeof(retired->line_colors));
+            draw->instance->poses.line_active = 1;
             draw->fading_out = 1;
         }
         retired->kind = 0;
@@ -5622,8 +6674,8 @@ void hd_attached_quad(const VECTORF *center, const VECTORF corners[4], const HD_
         vertices[point].vz += position.vz;
     }
     hd_world_quad(vertices, texture, colors, 1);
-    hd.model_draws[hd.model_count - 1].poses.centered_billboard = 1;
-    hd.model_draws[hd.model_count - 1].poses.center = *center;
+    hd.model_draws[hd.model_count - 1].instance->poses.centered_billboard = 1;
+    hd.model_draws[hd.model_count - 1].instance->poses.center = *center;
 }
 
 void hd_set_lighting(const MATRIX *rotation)
@@ -5675,31 +6727,86 @@ static MATRIXF wheel_transform(const HD_WHEEL_SAMPLE *sample, sint32 hub)
     return result;
 }
 
+static struct
+{
+    uint64 presentation;
+    float phase;
+    HD_POSE inputs[2], pose;
+    MATRIXF matrix;
+} camera_samples[HD_VIEWS];
+
+static void sample_draw_camera(const HD_MODEL_DRAW *draw, HD_POSE *camera)
+{
+    if (color_pass.camera != NULL)
+        *camera = *color_pass.camera;
+    else
+    {
+        uint32 view = draw->view;
+        if (camera_samples[view].presentation != player_cube.presentation || camera_samples[view].phase != hd.render_phase ||
+            memcmp(camera_samples[view].inputs, draw->instance->poses.camera, sizeof(camera_samples[view].inputs)) != 0)
+        {
+            camera_samples[view].presentation = player_cube.presentation;
+            camera_samples[view].phase = hd.render_phase;
+            memcpy(camera_samples[view].inputs, draw->instance->poses.camera, sizeof(camera_samples[view].inputs));
+            hd_pose_interpolate(&draw->instance->poses.camera[0], &draw->instance->poses.camera[1], hd.render_phase, &camera_samples[view].pose);
+            QuatMatrixf(&camera_samples[view].pose.rotation, &camera_samples[view].matrix);
+        }
+        *camera = camera_samples[view].pose;
+    }
+}
+
+static void sample_camera_matrix(const HD_POSE *camera, MATRIXF *matrix)
+{
+    if (color_pass.rotation != NULL)
+        *matrix = *color_pass.rotation;
+    else
+    {
+        for (uint32 view = 0; view < HD_VIEWS; ++view)
+            if (camera_samples[view].presentation == player_cube.presentation && camera_samples[view].phase == hd.render_phase &&
+                memcmp(&camera_samples[view].pose, camera, sizeof(*camera)) == 0)
+            {
+                *matrix = camera_samples[view].matrix;
+                return;
+            }
+        QuatMatrixf(&camera->rotation, matrix);
+    }
+}
+
 static MATRIXF interpolated_transform(const HD_MODEL_DRAW *draw)
 {
     HD_POSE camera, object;
     MATRIXF view, model, result;
     VECTORF delta, translated;
-    if (hd.render_phase >= 1.0f && !hd.race_frame)
-        return draw->transform;
-    hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-    if (player_cube.active)
-        camera = player_cube.camera;
-    if (sun_shadow.active)
-        camera = sun_shadow.camera;
-    hd_pose_interpolate(&draw->poses.object[0], &draw->poses.object[1], hd.render_phase, &object);
-    if (draw->poses.world_translation)
+    if (hd.render_phase >= 1.0f && !hd.race_frame && !(color_pass.kind == HD_PASS_PLANAR))
+        return draw->instance->transform;
+    sample_draw_camera(draw, &camera);
+    const HD_CAR_SHADOW *car = draw->car_slot >= 0 && draw->car_slot < HD_SHADOW_CARS ? &sun_shadow.cars[draw->car_slot] : NULL;
+    sint32 cached = car != NULL && car->presentation == player_cube.presentation &&
+        memcmp(car->inputs, draw->instance->poses.object, sizeof(car->inputs)) == 0;
+    HD_MODEL_INSTANCE *instance = draw->instance;
+    if (instance->sampled_serial != player_cube.presentation || instance->sampled_phase != hd.render_phase)
     {
-        object.position.x -= draw->poses.object[1].position.x;
-        object.position.y -= draw->poses.object[1].position.y;
-        object.position.z -= draw->poses.object[1].position.z;
+        if (cached) instance->sampled_object = car->pose;
+        else hd_pose_interpolate(&instance->poses.object[0], &instance->poses.object[1], hd.render_phase, &instance->sampled_object);
+        QuatMatrixf(&instance->sampled_object.rotation, &instance->sampled_world);
+        instance->sampled_serial = player_cube.presentation; instance->sampled_phase = hd.render_phase;
+    }
+    object = instance->sampled_object;
+    if (draw->instance->poses.world_translation)
+    {
+        object.position.x -= draw->instance->poses.object[1].position.x;
+        object.position.y -= draw->instance->poses.object[1].position.y;
+        object.position.z -= draw->instance->poses.object[1].position.z;
         object.rotation = (QUATF){0.0f, 0.0f, 0.0f, 1.0f};
     }
-    QuatMatrixf(&camera.rotation, &view);
-    QuatMatrixf(&object.rotation, &model);
+    sample_camera_matrix(&camera, &view);
+    if (cached && !draw->instance->poses.world_translation)
+        model = car->world[0];
+    else if (draw->instance->poses.world_translation) QuatMatrixf(&object.rotation, &model);
+    else model = instance->sampled_world;
     MulMatrix0f(&view, &model, &result);
     delta = (VECTORF){object.position.x, object.position.y, object.position.z};
-    if (!draw->poses.relative)
+    if (!draw->instance->poses.relative)
     {
         delta.vx -= camera.position.x;
         delta.vy -= camera.position.y;
@@ -5709,47 +6816,75 @@ static MATRIXF interpolated_transform(const HD_MODEL_DRAW *draw)
     result.t[0] = translated.vx;
     result.t[1] = translated.vy;
     result.t[2] = translated.vz;
-    if (draw->poses.wheel_active)
+    if (draw->instance->poses.wheel_active)
     {
-        const HD_WHEEL_SAMPLE *previous = &draw->poses.wheel[0], *current = &draw->poses.wheel[1];
-        HD_WHEEL_SAMPLE sample;
-        MATRIXF local, source_local, source, inverse, desired, combined;
-        sample.center.vx = previous->center.vx + hd.render_phase * (current->center.vx - previous->center.vx);
-        sample.center.vy = previous->center.vy + hd.render_phase * (current->center.vy - previous->center.vy);
-        sample.center.vz = previous->center.vz + hd.render_phase * (current->center.vz - previous->center.vz);
-        sample.steering = previous->steering + hd.render_phase * (current->steering - previous->steering);
-        sample.spin = previous->spin + hd.render_phase * (current->spin - previous->spin);
-        local = wheel_transform(&sample, draw->poses.wheel_hub);
-        source_local = wheel_transform(current, draw->poses.wheel_hub);
-        CompMatrixf(&result, &local, &desired);
-        CompMatrixf(&draw->poses.source_transform, &source_local, &source);
-        inverse_source_transform(&source, &inverse);
-        CompMatrixf(&desired, &inverse, &combined);
+        const HD_WHEEL_SAMPLE *previous = &instance->poses.wheel[0], *current = &instance->poses.wheel[1];
+        if (instance->wheel_serial != player_cube.presentation || instance->wheel_phase != hd.render_phase)
+        {
+            HD_WHEEL_SAMPLE sample;
+            sample.center.vx = previous->center.vx + hd.render_phase * (current->center.vx - previous->center.vx);
+            sample.center.vy = previous->center.vy + hd.render_phase * (current->center.vy - previous->center.vy);
+            sample.center.vz = previous->center.vz + hd.render_phase * (current->center.vz - previous->center.vz);
+            sample.steering = previous->steering + hd.render_phase * (current->steering - previous->steering);
+            sample.spin = previous->spin + hd.render_phase * (current->spin - previous->spin);
+            instance->sampled_wheel = wheel_transform(&sample, instance->poses.wheel_hub);
+            instance->wheel_serial = player_cube.presentation; instance->wheel_phase = hd.render_phase;
+        }
+        MATRIXF desired, combined;
+        CompMatrixf(&result, &instance->sampled_wheel, &desired);
+        if (instance->poses.local_wheel_geometry) return desired;
+        if (!instance->source_wheel_ready)
+        {
+            MATRIXF source_local = wheel_transform(current, instance->poses.wheel_hub), source;
+            CompMatrixf(&instance->poses.source_transform, &source_local, &source);
+            inverse_source_transform(&source, &instance->source_wheel_inverse);
+            instance->source_wheel_ready = 1;
+        }
+        CompMatrixf(&desired, &instance->source_wheel_inverse, &combined);
         return combined;
     }
-    if (draw->poses.billboard)
+    if (draw->instance->poses.billboard)
     {
         QUATF facing;
         MATRIXF rotation;
-        SlerpQuatf(&draw->poses.facing[0], &draw->poses.facing[1], hd.render_phase, &facing);
+        SlerpQuatf(&draw->instance->poses.facing[0], &draw->instance->poses.facing[1], hd.render_phase, &facing);
         QuatMatrixf(&facing, &rotation);
+        if ((color_pass.kind == HD_PASS_PLANAR))
+        {
+            HD_POSE source_camera;
+            MATRIXF original, change, reflected;
+            hd_pose_interpolate(&draw->instance->poses.camera[0], &draw->instance->poses.camera[1], hd.render_phase, &source_camera);
+            QuatMatrixf(&source_camera.rotation, &original);
+            IdentityMatrixf(&change);
+            for (uint32 row = 0; row < 3; ++row)
+                for (uint32 column = 0; column < 3; ++column)
+                {
+                    change.m[row][column] = 0.0f;
+                    for (uint32 axis = 0; axis < 3; ++axis)
+                        change.m[row][column] += planar.matrix.m[row][axis] * original.m[column][axis];
+                }
+            MulMatrix0f(&change, &rotation, &reflected);
+            memcpy(rotation.m, reflected.m, sizeof(rotation.m));
+        }
+        if (draw->model->billboard_shadow_prepared && environment_shadow.card_basis_valid[draw->view])
+            MulMatrix0f(&view, &environment_shadow.card_basis[draw->view], &rotation);
         memcpy(result.m, rotation.m, sizeof(result.m));
     }
-    if (draw->poses.centered_billboard)
+    if (draw->instance->poses.centered_billboard)
     {
         VECTORF previous_center, center;
-        VECTORF source_center = draw->poses.center;
+        VECTORF source_center = draw->instance->poses.center;
         MATRIXF offset;
         float scale = 1.0f;
-        if (draw->poses.particle_active)
+        if (draw->instance->poses.particle_active)
         {
-            const HD_PARTICLE_SAMPLE *previous = &draw->poses.particle[0], *current = &draw->poses.particle[1];
+            const HD_PARTICLE_SAMPLE *previous = &draw->instance->poses.particle[0], *current = &draw->instance->poses.particle[1];
             source_center.vx = previous->position.vx + hd.render_phase * (current->position.vx - previous->position.vx);
             source_center.vy = previous->position.vy + hd.render_phase * (current->position.vy - previous->position.vy);
             source_center.vz = previous->position.vz + hd.render_phase * (current->position.vz - previous->position.vz);
             scale = (previous->size + hd.render_phase * (current->size - previous->size)) / current->size;
         }
-        RotTransf(&draw->poses.source_transform, &draw->poses.center, &previous_center);
+        RotTransf(&draw->instance->poses.source_transform, &draw->instance->poses.center, &previous_center);
         RotTransf(&result, &source_center, &center);
         IdentityMatrixf(&offset);
         offset.m[0][0] = offset.m[1][1] = offset.m[2][2] = scale;
@@ -5758,10 +6893,10 @@ static MATRIXF interpolated_transform(const HD_MODEL_DRAW *draw)
         offset.t[2] = center.vz - scale * previous_center.vz;
         return offset;
     }
-    if (draw->poses.view_geometry)
+    if (draw->instance->poses.view_geometry)
     {
         MATRIXF inverse, combined;
-        inverse_source_transform(&draw->poses.source_transform, &inverse);
+        inverse_source_transform(&draw->instance->poses.source_transform, &inverse);
         CompMatrixf(&result, &inverse, &combined);
         return combined;
     }
@@ -5772,25 +6907,21 @@ static sint32 prepare_line_geometry(const HD_MODEL_DRAW *draw)
 {
     static const uint8 order[6] = {0, 1, 2, 1, 3, 2};
     const HD_VIEW *view = &hd.viewports[draw->view];
-    HD_PROJECTION projection = interpolated_projection(draw->projection);
+    HD_PROJECTION projection = interpolated_projection(draw->instance->projection);
     HD_POSE camera;
     MATRIXF rotation;
     VECTORF points[2];
-    RGBC colors[2] = {draw->poses.line_colors[0], draw->poses.line_colors[1]};
+    RGBC colors[2] = {draw->instance->poses.line_colors[0], draw->instance->poses.line_colors[1]};
     VID_VERTEX2D *vertices;
     float projected[2][2], aspect, x_scale, y_scale, center_x, center_y, dx, dy, length, half_width;
     uint32 point, vertex;
     if (view->viewport.w <= 0 || view->viewport.h <= 0)
         return 0;
-    hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-    if (player_cube.active)
-        camera = player_cube.camera;
-    if (sun_shadow.active)
-        camera = sun_shadow.camera;
-    QuatMatrixf(&camera.rotation, &rotation);
+    sample_draw_camera(draw, &camera);
+    sample_camera_matrix(&camera, &rotation);
     for (point = 0; point < 2; ++point)
     {
-        const VECTORF *previous = &draw->poses.line[0][point], *current = &draw->poses.line[1][point];
+        const VECTORF *previous = &draw->instance->poses.line[0][point], *current = &draw->instance->poses.line[1][point];
         VECTORF relative = {previous->vx + hd.render_phase * (current->vx - previous->vx) - camera.position.x, previous->vy + hd.render_phase * (current->vy - previous->vy) - camera.position.y, previous->vz + hd.render_phase * (current->vz - previous->vz) - camera.position.z};
         ApplyMatrixf(&rotation, &relative, &points[point]);
     }
@@ -5855,12 +6986,8 @@ static void prepare_quad_geometry(const HD_MODEL_DRAW *draw)
     HD_SPRITE_TEXTURE *sprite = (texture->flags & HD_TEXTURED) != 0 ? sprite_texture_get(texture) : NULL;
     uint32 vertex;
     XASSERT(vertices != NULL);
-    hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-    if (player_cube.active)
-        camera = player_cube.camera;
-    if (sun_shadow.active)
-        camera = sun_shadow.camera;
-    QuatMatrixf(&camera.rotation, &rotation);
+    sample_draw_camera(draw, &camera);
+    sample_camera_matrix(&camera, &rotation);
     memset(vertices, 0, 6 * sizeof(*vertices));
     for (vertex = 0; vertex < 6; ++vertex)
     {
@@ -5910,7 +7037,7 @@ static void environment_uniforms(const HD_MODEL_DRAW *draw, const MATRIXF *trans
 {
     const HD_ENV_SAMPLE *previous = &draw->environment_samples[0], *current = &draw->environment_samples[1];
     uint32 channel;
-    if (draw->dynamic != 3)
+    if (draw->kind != HD_COMMAND_REFLECTION)
         return;
     for (channel = 0; channel < 3; ++channel)
         uniforms[12][channel + 1] = previous->tint[channel] + hd.render_phase * (current->tint[channel] - previous->tint[channel]);
@@ -5944,7 +7071,7 @@ static void submit_police_light(const HD_MODEL_DRAW *draw, uint32 phase)
 {
     const HD_POLICE_INPUT *input = &draw->police;
     const HD_VIEW *view = &hd.viewports[draw->view];
-    HD_PROJECTION projection = interpolated_projection(draw->projection);
+    HD_PROJECTION projection = interpolated_projection(draw->instance->projection);
     MATRIXF transform;
     float uniforms[12][4] = {{0}};
     float aspect = view->viewport.h > 0 ? (float)view->viewport.w / view->viewport.h : 4.0f / 3.0f;
@@ -5990,11 +7117,11 @@ static void submit_police_light(const HD_MODEL_DRAW *draw, uint32 phase)
     uniforms[11][3] = input->far_depth;
     vid_viewport(view->viewport);
     vid_uniforms(&uniforms[0][0], 12);
-    shadow_pass(hd.police_materials[0]);
+    bind_scene_material(hd.police_materials[0]);
     vid_submit(draw->model->geometry, draw->model->indices, 0, 12);
     if (draw->blend != 0)
     {
-        shadow_pass(hd.police_materials[draw->blend]);
+        bind_scene_material(hd.police_materials[draw->blend]);
         vid_submit(draw->model->geometry, draw->model->indices, 0, 12);
     }
 }
@@ -6011,11 +7138,152 @@ static sint32 cube_bounds_visible(const MATRIXF *transform, VEC3F center, float 
     return point.vz + radius > 1.0f && point.vz - radius < far_plane && fabsf(point.vx) <= point.vz + radius * 1.414214f && fabsf(point.vy) <= point.vz + radius * 1.414214f;
 }
 
+// cache only pass/view state; material lanes are patched by each command
+static void common_uniforms(const HD_MODEL_DRAW *draw, float uniforms[HD_U_COUNT][4])
+{
+    typedef struct HD_COMMON_UNIFORMS
+    {
+        const HD_POSE *source;
+        uint64 serial, generation;
+        uint32 face;
+        float phase;
+        float values[HD_U_PLANAR_SETTINGS - HD_U_CAR_SHADOW0 + 1][4];
+    } HD_COMMON_UNIFORMS;
+    static HD_COMMON_UNIFORMS cache[3][HD_VIEWS + 1][64];
+    HD_POSE sampled;
+    uint32 flags = 0, row, column;
+    if (sun_shadow.ready && draw->model->visibility == NULL && (draw->kind == HD_COMMAND_MODEL || draw->kind == HD_COMMAND_SOLID)) flags |= 1u;
+    if ((draw->car_slot >= 0 && draw->car_slot < 14) || (draw->kind == HD_COMMAND_MODEL && draw->model->kind != 12 && !draw->instance->poses.relative && !draw->instance->poses.view_geometry)) flags |= 2u;
+    if (environment_shadow.ready && (hd.race_frame || hd.paused) && draw->model->visibility == NULL && (draw->kind == HD_COMMAND_MODEL || draw->kind == HD_COMMAND_SOLID) && !draw->instance->poses.view_geometry && draw->model->kind != 12) flags |= 4u;
+    if ((hd.race_frame || hd.paused) && (draw->surface != HD_SURFACE_AUTHORED || (draw->car_slot >= 0 && draw->car_slot < CAR_RACE_MODEL_COUNT)) && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0) flags |= 8u;
+    if (local_lights.count != 0 && (hd.race_frame || hd.paused) && draw->model->visibility == NULL && draw->model->kind != 12 && !draw->instance->poses.view_geometry && (draw->quad_texture.flags & (HD_LAMP_GLOW | HD_LENS_FLARE)) == 0) flags |= 16u;
+    if (!(color_pass.kind == HD_PASS_PLANAR) && !(color_pass.kind == HD_PASS_CUBE) && planar.ready[draw->view] && (hd.race_frame || hd.paused)) flags |= 32u;
+    HD_COMMON_UNIFORMS *entry = &cache[color_pass.kind][draw->view][flags];
+    const HD_POSE *source = color_pass.camera ? NULL : draw->instance->poses.camera;
+    uint32 face = color_pass.kind == HD_PASS_CUBE ? player_cube.faces + 1 : 0;
+    if (entry->serial != player_cube.presentation || entry->generation != hd.motion_generation ||
+        entry->source != source || entry->face != face || entry->phase != hd.render_phase)
+    {
+        sample_draw_camera(draw, &sampled);
+        entry->serial = player_cube.presentation; entry->generation = hd.motion_generation;
+        entry->source = source; entry->face = face; entry->phase = hd.render_phase;
+        float prepared[HD_U_COUNT][4] = {{0}};
+        float (*uniforms)[4] = prepared;
+        const HD_POSE *camera = &sampled;
+        MATRIXF sampled_rotation;
+        sample_camera_matrix(camera, &sampled_rotation);
+        const MATRIXF *rotation = &sampled_rotation;
+    if ((flags & 1u) != 0)
+    {
+        uint32 axis;
+        for (row = 0; row < 3; ++row)
+        {
+            float scale = (row == 1 ? -1.0f : 1.0f) / (row == 2 ? sun_shadow.depth : sun_shadow.extent);
+            for (column = 0; column < 3; ++column)
+                for (axis = 0; axis < 3; ++axis)
+                    uniforms[HD_U_CAR_SHADOW0 + row][column] += scale * sun_shadow.basis.m[row][axis] * rotation->m[column][axis];
+            uniforms[HD_U_CAR_SHADOW0 + row][3] = 0.0f;
+            for (axis = 0; axis < 3; ++axis)
+                uniforms[HD_U_CAR_SHADOW0 + row][3] += scale * sun_shadow.basis.m[row][axis] * ((float *)&camera->position)[axis];
+            uniforms[HD_U_CAR_SHADOW0 + row][3] -= scale * sun_shadow.center[row];
+        }
+        memcpy(uniforms[HD_U_CAR_SAMPLE0], sun_shadow.samples, sun_shadow.sample_count * sizeof(sun_shadow.samples[0]));
+        uniforms[HD_U_SHADOW_COUNTS][0] = (float)sun_shadow.sample_count;
+        uniforms[HD_U_SHADOW_FILTER][0] = 1.0f / HD_SHADOW_RESOLUTION;
+        uniforms[HD_U_SHADOW_FILTER][1] = 5.24288f / sun_shadow.depth;
+        uniforms[HD_U_SHADOW_FILTER][2] = 1.0f;
+        uniforms[HD_U_SHADOW_FILTER][3] = (flags & 2u) != 0;
+        memcpy(uniforms[HD_U_SUN_AMBIENT], sun_shadow.ambient, sizeof(sun_shadow.ambient));
+        for (row = 0; row < 3; ++row)
+            for (axis = 0; axis < 3; ++axis)
+                uniforms[HD_U_SUN_DIRECTION][row] -= rotation->m[row][axis] * sun_shadow.basis.m[2][axis];
+        memcpy(uniforms[HD_U_SUN_COLOR], sun_shadow.color, sizeof(sun_shadow.color));
+        uniforms[HD_U_SUN_COLOR][3] = (float)sun_shadow.directional_only;
+    }
+    if ((flags & 4u) != 0)
+    {
+        uint32 shadow_view = (color_pass.kind == HD_PASS_CUBE) ? 0 : draw->view;
+        uniforms[HD_U_SHADOW_COUNTS][1] = (float)(shadow_view * HD_ENV_SHADOW_CASCADES);
+        uniforms[HD_U_SHADOW_COUNTS][2] = environment_shadow.extent[shadow_view][0] / environment_shadow.extent[shadow_view][1];
+        uniforms[HD_U_SUN_AMBIENT][3] = environment_shadow.depth[shadow_view][0] / environment_shadow.depth[shadow_view][1] * ((color_pass.kind == HD_PASS_CUBE) || (color_pass.kind == HD_PASS_PLANAR) ? -1.0f : 1.0f);
+        uniforms[HD_U_SUN_DIRECTION][3] = environment_shadow.split;
+        for (row = 0; row < 3; ++row)
+        {
+            float scale = (row == 1 ? -1.0f : 1.0f) / (row == 2 ? environment_shadow.depth[shadow_view][0] : environment_shadow.extent[shadow_view][0]);
+            for (column = 0; column < 3; ++column)
+                for (uint32 axis = 0; axis < 3; ++axis)
+                    uniforms[HD_U_ENV_SHADOW0 + row][column] += scale * environment_shadow.basis.m[row][axis] * rotation->m[column][axis];
+            uniforms[HD_U_ENV_SHADOW0 + row][3] = 0.5f - scale * environment_shadow.center[shadow_view][0][row];
+            for (uint32 axis = 0; axis < 3; ++axis)
+                uniforms[HD_U_ENV_SHADOW0 + row][3] += scale * environment_shadow.basis.m[row][axis] * camera->position.v[axis];
+            float ratio = row == 2 ? fabsf(uniforms[HD_U_SUN_AMBIENT][3]) : uniforms[HD_U_SHADOW_COUNTS][2];
+            float far_scale = (row == 1 ? -1.0f : 1.0f) / (row == 2 ? environment_shadow.depth[shadow_view][1] : environment_shadow.extent[shadow_view][1]);
+            // share orientation instead of uploading a second matrix
+            uniforms[HD_U_LIGHT_WORLD0 + row][3] = 0.5f * (1.0f - ratio) + far_scale * (environment_shadow.center[shadow_view][0][row] - environment_shadow.center[shadow_view][1][row]);
+        }
+    }
+    if ((flags & 8u) != 0)
+    {
+        HD_LIGHT_ZONE zone = lighting_zone(0);
+        VECTORF direction = {zone.direction.vx / 4096.0f, zone.direction.vy / 4096.0f, zone.direction.vz / 4096.0f}, view_direction;
+        ApplyMatrixf(rotation, &direction, &view_direction);
+        float length = sqrtf(view_direction.vx * view_direction.vx + view_direction.vy * view_direction.vy + view_direction.vz * view_direction.vz);
+        if (length > 0.00001f)
+        {
+            uniforms[HD_U_MATERIAL_SUN][0] = view_direction.vx / length;
+            uniforms[HD_U_MATERIAL_SUN][1] = view_direction.vy / length;
+            uniforms[HD_U_MATERIAL_SUN][2] = view_direction.vz / length;
+            for (row = 0; row < 3; ++row)
+                uniforms[HD_U_MATERIAL_TINT][row] = zone.color[row] / 128.0f;
+        }
+    }
+    if ((flags & 16u) != 0)
+    {
+        for (row = 0; row < 3; ++row)
+            for (column = 0; column < 3; ++column)
+                uniforms[HD_U_LIGHT_WORLD0 + row][column] = rotation->m[column][row];
+        uniforms[HD_U_LIGHT_ORIGIN][0] = camera->position.x - local_lights.origin.x;
+        uniforms[HD_U_LIGHT_ORIGIN][1] = camera->position.y - local_lights.origin.y;
+        uniforms[HD_U_LIGHT_ORIGIN][2] = camera->position.z - local_lights.origin.z;
+        uniforms[HD_U_LIGHT_ORIGIN][3] = (float)local_lights.count;
+    }
+    if ((flags & 32u) != 0)
+    {
+        memcpy(uniforms[HD_U_PLANAR0], planar.projection[draw->view], sizeof(planar.projection[draw->view]));
+        for (uint32 axis = 0; axis < 3; ++axis)
+        {
+            for (uint32 component = 0; component < 3; ++component)
+                uniforms[HD_U_PLANAR_WORLD0 + axis][component] = rotation->m[component][axis];
+            uniforms[HD_U_PLANAR_WORLD0 + axis][3] = camera->position.v[axis];
+        }
+        uniforms[HD_U_PLANAR_SETTINGS][0] = hd.wetness[0] + hd.render_phase * (hd.wetness[1] - hd.wetness[0]);
+        uniforms[HD_U_PLANAR_SETTINGS][1] = 1.0f;
+        uniforms[HD_U_PLANAR_SETTINGS][2] = 1.0f / planar.width[draw->view];
+        uniforms[HD_U_PLANAR_SETTINGS][3] = 1.0f / planar.height[draw->view];
+    }
+        memcpy(entry->values, prepared + HD_U_CAR_SHADOW0, sizeof(entry->values));
+    }
+    float surface = uniforms[HD_U_MATERIAL_SUN][3], category = uniforms[HD_U_MATERIAL_TINT][3];
+    memcpy(uniforms + HD_U_CAR_SHADOW0, entry->values, sizeof(entry->values));
+    uniforms[HD_U_MATERIAL_SUN][3] = surface;
+    uniforms[HD_U_MATERIAL_TINT][3] = category;
+    if (flags & 8u)
+    {
+        HD_SURFACE_RESPONSE response = hd_surface_response(draw->surface);
+        uniforms[HD_U_SURFACE][0] = response.roughness;
+        uniforms[HD_U_SURFACE][1] = response.reflectance;
+        uniforms[HD_U_SURFACE][2] = response.clearcoat;
+        uniforms[HD_U_SURFACE][3] = response.relief;
+    }
+}
+
 static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE_BATCH_GROUP *batch)
 {
-    if (player_cube.active && cube_excludes(draw))
+    if (draw->kind == HD_COMMAND_SOLID && draw->instance->poses.wheel_active && draw->count == 0)
         return;
-    if (sun_shadow.active && (draw->car_slot < 0 || draw->car_slot >= 14 || phase == 2 || draw->view != 0 || draw->model->visibility != NULL || draw->dynamic == 3 || draw->dynamic == 1 || draw->model->kind == 12 || (draw->dynamic == 2 && !draw->poses.wheel_active)))
+    if ((color_pass.kind == HD_PASS_PLANAR) && planar_excludes(draw))
+        return;
+    if ((color_pass.kind == HD_PASS_CUBE) && cube_excludes(draw))
         return;
     if (batch == NULL && draw->model->static_pool != NULL)
     {
@@ -6036,13 +7304,21 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
                 selected.world_space = 1;
                 selected.first = part->source_first;
                 selected.count = part->count;
+                while (range + 1 < draw->model->range_count)
+                {
+                    const HD_MODEL_RANGE *next = &draw->model->ranges[range + 1];
+                    if (next->blend != part->blend || next->source_first != selected.first + selected.count) break;
+                    HD_SOURCE_GPU next_image = hd_texture_source_gpu(next->source_texture);
+                    if (next_image.texture != image.texture || (next_image.classes & 4) == 0) break;
+                    selected.count += next->count; ++range;
+                }
                 selected.material = source_material(image.texture, part->blend, 2, 1)->batch_material;
                 submit_model(draw, phase, &selected);
             }
         }
         return;
     }
-    if (player_cube.active && player_cube.recording)
+    if ((color_pass.kind == HD_PASS_CUBE) && player_cube.recording)
     {
         HD_CUBE_COMMAND *command;
         if (player_cube.command_count == player_cube.command_capacity)
@@ -6058,22 +7334,33 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         if (batch)
             command->batch = *batch;
     }
-    float uniforms[54][4] = {{0}};
-    MATRIXF transform, light = draw->light, previous_light;
+    float uniforms[HD_U_COUNT][4];
+    memset(uniforms, 0, HD_U_CAR_SHADOW0 * sizeof(uniforms[0]));
+    memset(uniforms[HD_U_SKY], 0, sizeof(uniforms[HD_U_SKY]));
+    reflection_binding_view = draw->view;
+    uniforms[HD_U_MATERIAL_SUN][3] = (float)draw->surface;
+    uniforms[HD_U_MATERIAL_TINT][3] = draw->car_slot >= 0 && draw->car_slot < HD_SHADOW_CARS ? 1.0f : draw->model->uses_sources ? 2.0f : 0.0f;
+    MATRIXF transform, light = draw->instance->light, previous_light;
     const HD_VIEW *view = &hd.viewports[draw->view];
-    HD_PROJECTION projection = interpolated_projection(draw->projection);
+    HD_PROJECTION projection = interpolated_projection(draw->instance->projection);
     uint32 row, column, range;
     float aspect = view->viewport.h > 0 ? (float)view->viewport.w / view->viewport.h : 4.0f / 3.0f;
-    if (player_cube.active)
+    if ((color_pass.kind == HD_PASS_CUBE))
         projection = (HD_PROJECTION){view->reference.w * 0.5f, view->reference.h * 0.5f, view->reference.x + view->reference.w * 0.5f, view->reference.y + view->reference.h * 0.5f};
     if (draw->fog_active)
     {
-        VID_FOG fog = {draw->fog_horizon / 3.0f, draw->fog_horizon * (5.0f / 6.0f), draw->fog_horizon, {draw->fog_color[0] / 255.0f, draw->fog_color[1] / 255.0f, draw->fog_color[2] / 255.0f}, {fabsf(draw->projection[1].x), fabsf(draw->projection[1].y)}};
+        VID_FOG fog = {draw->fog_horizon / 3.0f, draw->fog_horizon * (5.0f / 6.0f), draw->fog_horizon, {draw->fog_color[0] / 255.0f, draw->fog_color[1] / 255.0f, draw->fog_color[2] / 255.0f}, {fabsf(draw->instance->projection[1].x), fabsf(draw->instance->projection[1].y)}};
+        if (race_session.track == 22 && (hd.race_frame || hd.paused))
+        {
+            float rain = hd.rain_fog[0] + hd.render_phase * (hd.rain_fog[1] - hd.rain_fog[0]);
+            fog.near_dist *= 1.0f - 0.45f * rain;
+            fog.far_dist *= 1.0f - 0.15f * rain;
+        }
         vid_fog(&fog);
     }
     else
         vid_fog(NULL);
-    if (draw->dynamic == 4)
+    if (draw->kind == HD_COMMAND_POLICE)
     {
         if (phase == 2)
             submit_police_light(draw, 1);
@@ -6086,7 +7373,7 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         prepare_quad_geometry(draw);
         IdentityMatrixf(&transform);
     }
-    else if (draw->poses.line_active)
+    else if (draw->instance->poses.line_active)
     {
         if (phase != 2 || !prepare_line_geometry(draw))
             return;
@@ -6100,19 +7387,15 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
     {
         HD_POSE camera;
         VECTORF delta, translated;
-        hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-        if (player_cube.active)
-            camera = player_cube.camera;
-        if (sun_shadow.active)
-            camera = sun_shadow.camera;
-        QuatMatrixf(&camera.rotation, &transform);
+        sample_draw_camera(draw, &camera);
+        sample_camera_matrix(&camera, &transform);
         delta = (VECTORF){batch->origin.x - camera.position.x, batch->origin.y - camera.position.y, batch->origin.z - camera.position.z};
         ApplyMatrixf(&transform, &delta, &translated);
         transform.t[0] = translated.vx;
         transform.t[1] = translated.vy;
         transform.t[2] = translated.vz;
     }
-    if (player_cube.active && draw->model->visibility == NULL)
+    if ((color_pass.kind == HD_PASS_CUBE) && draw->model->visibility == NULL)
     {
         if (batch && batch->bounds_valid)
         {
@@ -6127,163 +7410,108 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
             if (!cube_bounds_visible(&transform, center, sqrtf(radius), draw->far_plane))
                 return;
         }
-        else if (batch == NULL && draw->dynamic == 0 && !draw->poses.billboard && !draw->poses.view_geometry && !draw->poses.relative && !cube_bounds_visible(&transform, draw->model->bounds_center, draw->model->bounds_radius, draw->far_plane))
+        else if (batch == NULL && draw->kind == HD_COMMAND_MODEL && !draw->instance->poses.billboard && !draw->instance->poses.view_geometry && !draw->instance->poses.relative && !cube_bounds_visible(&transform, draw->model->bounds_center, draw->model->bounds_radius, draw->far_plane))
             return;
     }
-    if (draw->light_history)
+    if (draw->instance->light_history)
     {
         HD_POSE object;
         MATRIXF sampled;
-        hd_pose_interpolate(&draw->poses.object[0], &draw->poses.object[1], hd.render_phase, &object);
+        hd_pose_interpolate(&draw->instance->poses.object[0], &draw->instance->poses.object[1], hd.render_phase, &object);
         QuatMatrixf(&object.rotation, &sampled);
-        MulMatrix0f(&draw->lighting[0].world, &sampled, &previous_light);
-        MulMatrix0f(&draw->lighting[1].world, &sampled, &light);
+        MulMatrix0f(&draw->instance->lighting[0].world, &sampled, &previous_light);
+        MulMatrix0f(&draw->instance->lighting[1].world, &sampled, &light);
     }
-    if (draw->dynamic != 0 && draw->dynamic != 2 && phase != 2)
+    if (draw->kind != HD_COMMAND_MODEL && draw->kind != HD_COMMAND_SOLID && phase != 2)
         return;
     for (row = 0; row < 3; ++row)
     {
         for (column = 0; column < 3; ++column)
         {
             uniforms[row][column] = transform.m[row][column];
-            uniforms[5 + row][column] = light.m[row][column];
-            uniforms[8 + row][column] = draw->light_history ? draw->lighting[1].color.m[row][column] : draw->color.m[row][column] / 4096.0f;
+            uniforms[HD_U_DRAW_COLOR + row][column] = light.m[row][column];
+            uniforms[HD_U_COLOR0 + row][column] = draw->instance->light_history ? draw->instance->lighting[1].color.m[row][column] : draw->instance->color.m[row][column] / 4096.0f;
         }
         uniforms[row][3] = transform.t[row];
-        uniforms[11][row] = draw->light_history ? draw->lighting[1].ambient[row] : draw->ambient[row];
+        uniforms[HD_U_AMBIENT][row] = draw->instance->light_history ? draw->instance->lighting[1].ambient[row] : draw->instance->ambient[row];
     }
-    uniforms[29][3] = 1.0f;
-    if (draw->light_history)
+    uniforms[HD_U_PREV_AMBIENT][3] = 1.0f;
+    if (draw->instance->light_history)
     {
         for (row = 0; row < 3; ++row)
         {
             for (column = 0; column < 3; ++column)
             {
-                uniforms[23 + row][column] = previous_light.m[row][column];
-                uniforms[26 + row][column] = draw->lighting[0].color.m[row][column];
+                uniforms[HD_U_PREV_LIGHT0 + row][column] = previous_light.m[row][column];
+                uniforms[HD_U_PREV_COLOR0 + row][column] = draw->instance->lighting[0].color.m[row][column];
             }
-            uniforms[29][row] = draw->lighting[0].ambient[row];
+            uniforms[HD_U_PREV_AMBIENT][row] = draw->instance->lighting[0].ambient[row];
         }
-        uniforms[29][3] = hd.render_phase;
+        uniforms[HD_U_PREV_AMBIENT][3] = hd.render_phase;
     }
-    uniforms[3][0] = 2.0f * projection.x / view->reference.w * (view->reference_aspect / aspect);
-    uniforms[3][1] = 2.0f * projection.y / view->reference.h;
-    uniforms[3][2] = 1.0f;
-    uniforms[3][3] = draw->far_plane;
-    uniforms[4][0] = 2.0f * (projection.center_x - view->reference.x) / view->reference.w - 1.0f;
-    uniforms[4][1] = 1.0f - 2.0f * (projection.center_y - view->reference.y) / view->reference.h;
-    uniforms[4][2] = projection.center_x;
-    uniforms[4][3] = projection.center_y;
-    memcpy(uniforms + 12, draw->environment, sizeof(draw->environment));
+    uniforms[HD_U_PROJECTION][0] = 2.0f * projection.x / view->reference.w * (view->reference_aspect / aspect);
+    uniforms[HD_U_PROJECTION][1] = 2.0f * projection.y / view->reference.h;
+    uniforms[HD_U_PROJECTION][2] = 1.0f;
+    uniforms[HD_U_PROJECTION][3] = draw->far_plane;
+    uniforms[HD_U_VIEWPORT][0] = 2.0f * (projection.center_x - view->reference.x) / view->reference.w - 1.0f;
+    uniforms[HD_U_VIEWPORT][1] = 1.0f - 2.0f * (projection.center_y - view->reference.y) / view->reference.h;
+    uniforms[HD_U_VIEWPORT][2] = projection.center_x;
+    uniforms[HD_U_VIEWPORT][3] = projection.center_y;
+    if (draw->kind == HD_COMMAND_REFLECTION)
+        memcpy(uniforms + 12, draw->environment, sizeof(draw->environment));
     environment_uniforms(draw, &transform, &projection, uniforms);
-    uniforms[11][3] = -1.0f;
-    uniforms[5][3] = draw->fading_out ? 1.0f - hd.render_phase : 1.0f;
+    uniforms[HD_U_AMBIENT][3] = -1.0f;
+    uniforms[HD_U_DRAW_COLOR][3] = draw->fading_out ? 1.0f - hd.render_phase : 1.0f;
     if (draw->quad_active)
-        uniforms[11][3] = draw->quad[0].brightness + hd.render_phase * (draw->quad[1].brightness - draw->quad[0].brightness);
-    if (draw->poses.particle_active)
-        uniforms[11][3] = draw->poses.particle[0].brightness + hd.render_phase * (draw->poses.particle[1].brightness - draw->poses.particle[0].brightness);
+        uniforms[HD_U_AMBIENT][3] = draw->quad[0].brightness + hd.render_phase * (draw->quad[1].brightness - draw->quad[0].brightness);
+    if (draw->instance->poses.particle_active)
+        uniforms[HD_U_AMBIENT][3] = draw->instance->poses.particle[0].brightness + hd.render_phase * (draw->instance->poses.particle[1].brightness - draw->instance->poses.particle[0].brightness);
+    if ((hd.race_frame || hd.paused) && draw->model->kind == 12 && draw->model->visibility == NULL && draw->car_slot < 0 && !draw->instance->poses.relative && !draw->instance->poses.view_geometry && draw->model->emission_gain > 1.0f && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+        uniforms[HD_U_AMBIENT][3] = -1.0f - draw->model->emission_gain;
     if (draw->hub_lit)
     {
-        uniforms[19][0] = draw->hub_normal.vx;
-        uniforms[19][1] = draw->hub_normal.vy;
-        uniforms[19][2] = draw->hub_normal.vz;
-        uniforms[19][3] = 1.0f;
-        uniforms[20][0] = draw->hub_anchor.vx;
-        uniforms[20][1] = draw->hub_anchor.vy;
-        uniforms[20][2] = draw->hub_anchor.vz;
-        uniforms[20][3] = draw->hub_cue[0];
+        uniforms[HD_U_HUB_NORMAL][0] = draw->hub_normal.vx;
+        uniforms[HD_U_HUB_NORMAL][1] = draw->hub_normal.vy;
+        uniforms[HD_U_HUB_NORMAL][2] = draw->hub_normal.vz;
+        uniforms[HD_U_HUB_NORMAL][3] = 1.0f;
+        uniforms[HD_U_HUB_ANCHOR][0] = draw->hub_anchor.vx;
+        uniforms[HD_U_HUB_ANCHOR][1] = draw->hub_anchor.vy;
+        uniforms[HD_U_HUB_ANCHOR][2] = draw->hub_anchor.vz;
+        uniforms[HD_U_HUB_ANCHOR][3] = draw->hub_cue[0];
         for (row = 0; row < 3; ++row)
-            uniforms[21][row] = draw->hub_far[row];
-        uniforms[21][3] = draw->hub_cue[1];
-        uniforms[22][0] = draw->hub_cue[2];
-        uniforms[22][1] = draw->hub_cue[3];
+            uniforms[HD_U_HUB_FAR][row] = draw->hub_far[row];
+        uniforms[HD_U_HUB_FAR][3] = draw->hub_cue[1];
+        uniforms[HD_U_HUB_CUE][0] = draw->hub_cue[2];
+        uniforms[HD_U_HUB_CUE][1] = draw->hub_cue[3];
     }
     vid_viewport(view->viewport);
-    uniforms[23][3] = draw->depth_bias;
-    uniforms[24][3] = draw->depth_offset;
-    if (view->headlight_active && (draw->model->static_pool != NULL || (draw->model->uses_sources && draw->model->kind >= 10 && draw->model->kind != 12)))
-    {
-        HD_POSE car_pose, camera;
-        MATRIXF car_rotation, camera_rotation;
-        VECTORF anchor, relative, position;
-        hd_pose_interpolate(&view->headlight_car[0], &view->headlight_car[1], hd.render_phase, &car_pose);
-        hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-        if (player_cube.active)
-            camera = player_cube.camera;
-        if (sun_shadow.active)
-            camera = sun_shadow.camera;
-        QuatMatrixf(&car_pose.rotation, &car_rotation);
-        QuatMatrixf(&camera.rotation, &camera_rotation);
-        ApplyMatrixf(&car_rotation, &view->headlight_origin, &anchor);
-        relative = (VECTORF){anchor.vx + car_pose.position.x - camera.position.x, anchor.vy + car_pose.position.y - camera.position.y, anchor.vz + car_pose.position.z - camera.position.z};
-        ApplyMatrixf(&camera_rotation, &relative, &position);
-        uniforms[30][0] = position.vx;
-        uniforms[30][1] = position.vy;
-        uniforms[30][2] = position.vz;
-        uniforms[30][3] = distance_lighting.radius;
-        memcpy(uniforms[31], distance_lighting.color, sizeof(distance_lighting.color));
-        uniforms[31][3] = distance_lighting.height;
-    }
-    if (sun_shadow.active)
-    {
-        uniforms[3][0] = uniforms[3][1] = 2.0f / sun_shadow.extent;
-        uniforms[3][2] = 0.0f;
-        uniforms[3][3] = sun_shadow.depth;
-        uniforms[4][0] = uniforms[4][1] = 0.0f;
-        uniforms[39][3] = 1.0f;
-    }
-    else if (sun_shadow.ready && draw->model->visibility == NULL && draw->dynamic == 0)
+    uniforms[HD_U_PREV_LIGHT0][3] = draw->depth_bias;
+    uniforms[HD_U_PREV_LIGHT1][3] = draw->depth_offset;
+
+    common_uniforms(draw, uniforms);
+    if ((color_pass.kind == HD_PASS_PLANAR) && draw->model->visibility == NULL)
+        memcpy(uniforms[HD_U_OBLIQUE], planar.oblique, sizeof(planar.oblique));
+    if ((color_pass.kind == HD_PASS_PLANAR) && draw->model->visibility != NULL)
+        uniforms[HD_U_SKY][0] = 1.0f;
+    if (!(color_pass.kind == HD_PASS_CUBE) && player_cube.ready && draw->kind == HD_COMMAND_REFLECTION && draw->car_slot >= 0 && draw->car_slot < CAR_RACE_MODEL_COUNT)
     {
         HD_POSE camera;
         MATRIXF rotation;
-        uint32 axis;
-        hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-        if (player_cube.active)
-            camera = player_cube.camera;
-        QuatMatrixf(&camera.rotation, &rotation);
-        for (row = 0; row < 3; ++row)
-        {
-            float scale = (row == 1 ? -1.0f : 1.0f) / (row == 2 ? sun_shadow.depth : sun_shadow.extent);
-            for (column = 0; column < 3; ++column)
-                for (axis = 0; axis < 3; ++axis)
-                    uniforms[32 + row][column] += scale * sun_shadow.basis.m[row][axis] * rotation.m[column][axis];
-            uniforms[32 + row][3] = 0.0f;
-            for (axis = 0; axis < 3; ++axis)
-                uniforms[32 + row][3] += scale * sun_shadow.basis.m[row][axis] * ((float *)&camera.position)[axis];
-            uniforms[32 + row][3] -= scale * sun_shadow.center[row];
-        }
-        memcpy(uniforms[40], sun_shadow.samples, sun_shadow.sample_count * sizeof(sun_shadow.samples[0]));
-        uniforms[39][0] = (float)sun_shadow.sample_count;
-        uniforms[35][0] = 1.0f / HD_SHADOW_RESOLUTION;
-        uniforms[35][1] = 5.24288f / sun_shadow.depth;
-        uniforms[35][2] = 1.0f;
-        uniforms[35][3] = draw->car_slot >= 0 && draw->car_slot < 14;
-        memcpy(uniforms[36], sun_shadow.ambient, sizeof(sun_shadow.ambient));
-        for (row = 0; row < 3; ++row)
-            for (axis = 0; axis < 3; ++axis)
-                uniforms[37][row] -= rotation.m[row][axis] * sun_shadow.basis.m[2][axis];
-        memcpy(uniforms[38], sun_shadow.color, sizeof(sun_shadow.color));
-        uniforms[38][3] = (float)sun_shadow.directional_only;
-    }
-    if (!player_cube.active && player_cube.ready && draw->dynamic == 3 && draw->car_slot >= 0 && draw->car_slot < CAR_RACE_MODEL_COUNT)
-    {
-        HD_POSE camera;
-        MATRIXF rotation;
-        hd_pose_interpolate(&draw->poses.camera[0], &draw->poses.camera[1], hd.render_phase, &camera);
-        QuatMatrixf(&camera.rotation, &rotation);
+        sample_draw_camera(draw, &camera);
+        sample_camera_matrix(&camera, &rotation);
         for (row = 0; row < 3; ++row)
             for (column = 0; column < 3; ++column)
-                uniforms[26 + row][column] = rotation.m[column][row];
-        uniforms[12][1] = player_cube.reflection_strength;
-        vid_uniforms(&uniforms[0][0], 54);
-        shadow_pass(player_cube.material);
+                uniforms[HD_U_PREV_COLOR0 + row][column] = rotation.m[column][row];
+        uniforms[HD_U_ENV_MODE][1] = player_cube.reflection_strength;
+        vid_uniforms(&uniforms[HD_U_OBJECT0][0], 72);
+        bind_scene_material(player_cube.material);
         vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         return;
     }
-    vid_uniforms(&uniforms[0][0], 54);
+    vid_uniforms(&uniforms[HD_U_OBJECT0][0], 72);
     if (batch != NULL)
     {
-        shadow_pass(batch->material);
+        bind_scene_material(batch->material);
         vid_submit(batch->geometry, batch->index_buffer, batch->first, batch->count);
         return;
     }
@@ -6292,11 +7520,11 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         for (range = 0; range < draw->model->sky_range_count; ++range)
         {
             const HD_MODEL_RANGE *part = &draw->model->sky_ranges[range];
-            shadow_pass(hd.sky_materials[0]);
+            bind_scene_material(hd.sky_materials[0]);
             vid_submit(draw->model->geometry, draw->model->sky_indices, part->first, part->count);
             if (part->blend != 0)
             {
-                shadow_pass(hd.sky_materials[part->blend]);
+                bind_scene_material(hd.sky_materials[part->blend]);
                 vid_submit(draw->model->geometry, draw->model->sky_indices, part->first, part->count);
             }
         }
@@ -6307,16 +7535,16 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         HD_SPRITE_TEXTURE *sprite = sprite_texture_get(&draw->quad_texture);
         if ((draw->quad_texture.flags & HD_SHADOW) != 0)
         {
-            shadow_pass(sprite_texture_material(sprite, 3, 1));
+            bind_scene_material(sprite_texture_material(sprite, 3, 1));
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         }
         else
         {
-            shadow_pass(sprite_texture_material(sprite, 0, 1));
+            bind_scene_material(sprite_texture_material(sprite, 0, 1));
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
             if (draw->blend != 0)
             {
-                shadow_pass(sprite_texture_material(sprite, draw->blend, 1));
+                bind_scene_material(sprite_texture_material(sprite, draw->blend, 1));
                 vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
             }
         }
@@ -6330,7 +7558,7 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
             const HD_CACHED_GROUP *group = draw->source_group;
             if (draw->source_order != 1 || draw->texture_transparent != (phase == 1))
                 return;
-            shadow_pass(source_material(group->texture, 0, cull, group->transparent)->material);
+            bind_scene_material(source_material(group->texture, 0, cull, group->transparent)->material);
             vid_submit(draw->model->geometry, draw->model->indices, group->first, group->count);
         }
         else if (draw->source_order == 2)
@@ -6340,45 +7568,45 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
                 HD_SOURCE_GPU image = hd_texture_source_gpu(part->source_texture);
                 if (part->blend != 0 && (image.classes & 4) != 0)
                 {
-                    shadow_pass(source_material(image.texture, part->blend, cull, 1)->material);
+                    bind_scene_material(source_material(image.texture, part->blend, cull, 1)->material);
                     vid_submit(draw->model->geometry, draw->model->indices, part->source_first, part->count);
                 }
             }
         return;
     }
-    if (draw->dynamic == 2 && (draw->quad_texture.flags & HD_PRIVATE_CAR_HUB) != 0)
+    if (draw->kind == HD_COMMAND_SOLID && (draw->quad_texture.flags & HD_PRIVATE_CAR_HUB) != 0)
     {
         if (phase == 0 || (phase == 2 && draw->blend != 0))
         {
             HD_SPRITE_TEXTURE *sprite = sprite_texture_get(&draw->quad_texture);
-            shadow_pass(sprite_texture_material(sprite, phase == 0 ? 0 : draw->blend, 1));
+            bind_scene_material(sprite_texture_material(sprite, phase == 0 ? 0 : draw->blend, 1));
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         }
         return;
     }
-    if (draw->dynamic == 2 && draw->model->texture_asset != NULL)
+    if (draw->kind == HD_COMMAND_SOLID && draw->model->texture_asset != NULL)
     {
         uint32 pass = phase == 2 ? draw->blend : 0;
         if ((phase < 2 && draw->texture_transparent == (phase == 1)) || (phase == 2 && pass != 0))
         {
-            shadow_pass(object_texture_material(draw, pass));
+            bind_scene_material(object_texture_material(draw, pass));
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         }
         return;
     }
-    if (draw->dynamic)
+    if (draw->kind)
     {
         if (phase == 1)
             return;
-        VID_MATERIAL **materials = draw->fading_out ? hd.retire_materials : draw->dynamic == 2 ? hd.solid_materials : draw->dynamic == 3 ? hd.environment_materials : hd.effect_materials;
-        if (phase == 0 || draw->dynamic != 2)
+        VID_MATERIAL **materials = draw->fading_out ? hd.retire_materials : draw->kind == HD_COMMAND_SOLID ? hd.solid_materials : draw->kind == HD_COMMAND_REFLECTION ? hd.environment_materials : hd.effect_materials;
+        if (phase == 0 || draw->kind != HD_COMMAND_SOLID)
         {
-            shadow_pass(materials[0]);
+            bind_scene_material(materials[0]);
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         }
         if (draw->blend != 0 && phase == 2)
         {
-            shadow_pass(materials[draw->blend]);
+            bind_scene_material(materials[draw->blend]);
             vid_submit(draw->model->geometry, draw->model->indices, draw->first, draw->count);
         }
         return;
@@ -6389,7 +7617,7 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
         {
             if (draw->model->static_pool != NULL || draw->source_order == 2 || draw->texture_transparent != (phase == 1))
                 return;
-            shadow_pass(object_texture_material(draw, 0));
+            bind_scene_material(object_texture_material(draw, 0));
             vid_submit(draw->model->geometry, draw->model->indices, 0, draw->model->index_count);
         }
         else
@@ -6402,7 +7630,7 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
                     continue;
                 while (range + 1 < draw->model->range_count && draw->model->ranges[range + 1].blend == part->blend)
                     count += draw->model->ranges[++range].count;
-                shadow_pass(object_texture_material(draw, part->blend));
+                bind_scene_material(object_texture_material(draw, part->blend));
                 vid_submit(draw->model->geometry, draw->model->indices, part->first, count);
             }
         }
@@ -6410,37 +7638,57 @@ static void submit_model(const HD_MODEL_DRAW *draw, uint32 phase, const HD_SCENE
     }
 }
 
-static void scene_batches_free(void)
+static void scene_batch_bank_free(HD_SCENE_BATCH_BANK **head)
 {
-    while (scene_batch_banks != NULL)
+    while (*head != NULL)
     {
-        HD_SCENE_BATCH_BANK *bank = scene_batch_banks;
+        HD_SCENE_BATCH_BANK *bank = *head;
         uint32 group;
-        scene_batch_banks = bank->next;
+        *head = bank->next;
         for (group = 0; group < bank->group_capacity; ++group)
         {
             vid_mat_free(bank->groups[group].material);
             free(bank->groups[group].indices);
         }
-        vid_mesh_free(bank->geometry);
-        vid_index_free(bank->indices);
-        vid_tex_free(bank->instances);
+        release_batch_geometry(bank->storage);
         free(bank->groups);
         free(bank->inputs);
         free(bank);
     }
-    scene_batch_cursor = NULL;
 }
 
-static sint32 scene_batch_eligible(const HD_MODEL_DRAW *draw, uint32 phase)
+static void scene_batches_free(void)
 {
-    if (player_cube.active && cube_excludes(draw))
+    for (uint32 pass = 0; pass < 2; ++pass) scene_batch_bank_free(&scene_batch_banks[pass]);
+    for (uint32 view = 0; view < HD_VIEWS; ++view)
+        scene_batch_bank_free(&planar.banks[view]);
+    scene_batch_cursor = NULL;
+    vid_tex_free(billboard_instances.texture);
+    free(billboard_instances.draws);
+    memset(&billboard_instances, 0, sizeof(billboard_instances));
+}
+
+static sint32 lamp_batch_compatible(const HD_MODEL_DRAW *draw)
+{
+    if (draw->model->kind != 12 || !draw->model->uses_sources || !draw->region_sampling ||
+        draw->model->batch_vertices == NULL || draw->instance->poses.relative || draw->instance->poses.view_geometry ||
+        draw->depth_bias != 0.0f || draw->depth_offset != 0.0f || draw->fading_out ||
+        (draw->blend != 2 && draw->blend != 4))
         return 0;
-    if (sun_shadow.active && (draw->car_slot < 0 || draw->car_slot >= 14 || draw->view != 0 || draw->model->visibility != NULL))
-        return 0;
-    const HD_DRAW_POSES *poses = &draw->poses;
+    for (uint32 range = 0; range < draw->model->range_count; ++range)
+        if (draw->model->ranges[range].blend != draw->blend)
+            return 0;
+    return 1;
+}
+
+static sint32 scene_batch_candidate(const HD_MODEL_DRAW *draw, uint32 phase)
+{
+    const HD_DRAW_POSES *poses = &draw->instance->poses;
     uint32 sample;
-    if (draw->source_order == 2 || draw->texture_transparent != (phase == 1) || !draw->region_sampling || draw->dynamic || draw->model->batch_vertices == NULL || poses->relative || poses->view_geometry || draw->depth_bias != 0.0f || draw->depth_offset != 0.0f || draw->fading_out)
+    sint32 lamp = lamp_batch_compatible(draw);
+    if (phase == 2 && !lamp)
+        return 0;
+    if (draw->source_order == 2 || (phase < 2 && draw->texture_transparent != (phase == 1)) || !draw->region_sampling || (draw->kind && !lamp) || draw->model->batch_vertices == NULL || poses->relative || poses->view_geometry || draw->depth_bias != 0.0f || draw->depth_offset != 0.0f || draw->fading_out)
         return 0;
     if (draw->model->kind >= 10)
         return 1;
@@ -6455,17 +7703,121 @@ static sint32 scene_batch_eligible(const HD_MODEL_DRAW *draw, uint32 phase)
     return 1;
 }
 
+static struct
+{
+    uint32 *storage, *lists[12], counts[12], capacity;
+    const HD_MODEL_DRAW *owner;
+    uint32 count;
+    uint64 serial;
+} submit_lists;
+
+static void invalidate_submit_lists(void)
+{
+    submit_lists.owner = NULL;
+}
+
+static void free_submit_lists(void)
+{
+    free(submit_lists.storage);
+    memset(&submit_lists, 0, sizeof(submit_lists));
+}
+
+static void reserve_submit_lists(uint32 capacity)
+{
+    if (submit_lists.capacity >= capacity)
+        return;
+    submit_lists.capacity = capacity;
+    submit_lists.storage = (uint32 *)realloc(submit_lists.storage, (size_t)12 * capacity * sizeof(uint32));
+    XASSERT(submit_lists.storage != NULL);
+    for (uint32 list = 0; list < 12; ++list)
+        submit_lists.lists[list] = submit_lists.storage + list * capacity;
+    submit_lists.owner = NULL;
+}
+
+static void prepare_submit_lists(void)
+{
+    if (submit_lists.owner == hd.model_draws && submit_lists.count == hd.model_count)
+        return;
+    reserve_submit_lists(hd.model_capacity);
+    memset(submit_lists.counts, 0, sizeof(submit_lists.counts));
+    billboard_instances.count = 0;
+    if (billboard_instances.list_capacity < hd.model_count)
+    {
+        billboard_instances.list_capacity = hd.model_capacity;
+        billboard_instances.draws = (uint32 *)realloc(billboard_instances.draws, hd.model_capacity * sizeof(uint32));
+        XASSERT(billboard_instances.draws != NULL);
+    }
+    for (uint32 index = 0; index < hd.model_count; ++index)
+    {
+        HD_MODEL_DRAW *draw = &hd.model_draws[index];
+        draw->instance_row = UINT32_MAX;
+        if (draw->model->kind >= 10 && (scene_batch_candidate(draw, 0) || scene_batch_candidate(draw, 1) || scene_batch_candidate(draw, 2)))
+        {
+            HD_MODEL_INSTANCE *instance = draw->instance;
+            if (instance->billboard_serial != submit_lists.serial + 1)
+            {
+                instance->billboard_serial = submit_lists.serial + 1;
+                instance->instance_row = billboard_instances.count;
+                billboard_instances.draws[billboard_instances.count++] = index;
+            }
+            draw->instance_row = instance->instance_row;
+        }
+        draw->batch_phases = 0;
+        if (draw->model->texture_asset != NULL)
+        {
+            object_texture_material(draw, 0);
+            draw->texture_transparent = (uint8)draw->model->texture_asset->transparent;
+        }
+        if (draw->model->visibility != NULL)
+        {
+            submit_lists.lists[11][submit_lists.counts[11]++] = index;
+            continue;
+        }
+        if (draw->kind == HD_COMMAND_SOLID && draw->instance->poses.wheel_active && draw->count == 0)
+            continue;
+        for (uint32 phase = 0; phase < 3; ++phase)
+        {
+            if (scene_batch_candidate(draw, phase))
+            {
+                uint32 list = phase * 2 + (draw->model->kind >= 10);
+                submit_lists.lists[list][submit_lists.counts[list]++] = index;
+                draw->batch_phases |= 1u << phase;
+            }
+            else if (phase < 2 && draw->model->static_pool != NULL)
+            {
+                if (draw->source_group != NULL && draw->texture_transparent == (phase == 1))
+                    submit_lists.lists[9 + phase][submit_lists.counts[9 + phase]++] = index;
+            }
+            else if (!(phase == 2 && draw->source_order == 2 && lamp_batch_compatible(draw)) &&
+                (phase < 2 || draw->kind != HD_COMMAND_MODEL || draw->model->has_transparent))
+                submit_lists.lists[6 + phase][submit_lists.counts[6 + phase]++] = index;
+        }
+    }
+    ++submit_lists.serial;
+    submit_lists.owner = hd.model_draws;
+    submit_lists.count = hd.model_count;
+}
+
+static sint32 scene_batch_eligible(const HD_MODEL_DRAW *draw, uint32 phase)
+{
+    return (draw->batch_phases & (1u << phase)) != 0 &&
+        (!(color_pass.kind == HD_PASS_PLANAR) || !planar_excludes(draw)) && (!(color_pass.kind == HD_PASS_CUBE) || !cube_excludes(draw));
+}
+
 static sint32 scene_batch_compatible(const HD_MODEL_DRAW *a, const HD_MODEL_DRAW *b)
 {
     uint32 sample;
-    if ((a->car_slot >= 0) != (b->car_slot >= 0) || a->view != b->view || a->far_plane != b->far_plane || a->fog_active != b->fog_active || a->fog_horizon != b->fog_horizon || memcmp(a->fog_color, b->fog_color, 3) != 0 || a->light_history != b->light_history || memcmp(a->projection, b->projection, sizeof(a->projection)) != 0 || memcmp(a->poses.camera, b->poses.camera, sizeof(a->poses.camera)) != 0)
+    if ((a->model->kind == 12) != (b->model->kind == 12) ||
+        (a->model->kind == 12 && (a->blend != b->blend || a->model->emission_gain != b->model->emission_gain)))
+        return 0;
+    if ((a->car_slot >= 0) != (b->car_slot >= 0) || a->view != b->view || a->far_plane != b->far_plane || a->fog_active != b->fog_active || a->fog_horizon != b->fog_horizon || memcmp(a->fog_color, b->fog_color, 3) != 0 || a->instance->light_history != b->instance->light_history || memcmp(a->instance->projection, b->instance->projection, sizeof(a->instance->projection)) != 0 || memcmp(a->instance->poses.camera, b->instance->poses.camera, 2 * sizeof(HD_POSE)) != 0)
         return 0;
     if (!a->model->has_lighting && !b->model->has_lighting)
         return 1;
-    if (!a->light_history)
-        return memcmp(a->light.m, b->light.m, sizeof(a->light.m)) == 0 && memcmp(a->color.m, b->color.m, sizeof(a->color.m)) == 0 && memcmp(a->ambient, b->ambient, sizeof(a->ambient)) == 0;
+    if (!a->instance->light_history)
+        return memcmp(a->instance->light.m, b->instance->light.m, sizeof(a->instance->light.m)) == 0 && memcmp(a->instance->color.m, b->instance->color.m, sizeof(a->instance->color.m)) == 0 && memcmp(a->instance->ambient, b->instance->ambient, sizeof(a->instance->ambient)) == 0;
     for (sample = 0; sample < 2; ++sample)
-        if (memcmp(a->lighting[sample].world.m, b->lighting[sample].world.m, sizeof(a->light.m)) != 0 || memcmp(a->lighting[sample].color.m, b->lighting[sample].color.m, sizeof(a->light.m)) != 0 || memcmp(a->lighting[sample].ambient, b->lighting[sample].ambient, sizeof(a->ambient)) != 0)
+        if (memcmp(a->instance->lighting[sample].world.m, b->instance->lighting[sample].world.m, sizeof(a->instance->light.m)) != 0 || memcmp(a->instance->lighting[sample].color.m, b->instance->lighting[sample].color.m, sizeof(a->instance->light.m)) != 0 || memcmp(a->instance->lighting[sample].ambient, b->instance->lighting[sample].ambient, sizeof(a->instance->ambient)) != 0)
             return 0;
     return 1;
 }
@@ -6486,11 +7838,107 @@ static uint32 source_draw_count(const HD_MODEL_DRAW *draw)
     return draw->source_group != NULL ? draw->source_group->count : draw->model->index_count;
 }
 
-static const VID_MATERIAL_DATA *source_draw_material(const HD_MODEL_DRAW *draw)
+static const VID_MATERIAL_DATA *source_draw_material(const HD_MODEL_DRAW *draw, uint32 phase)
 {
     if (draw->source_group != NULL)
-        return &source_material(draw->source_group->texture, 0, draw->model->kind == 12 ? 0 : 2, draw->source_group->transparent)->data;
+        return &source_material(draw->source_group->texture, phase == 2 ? draw->blend : 0, draw->model->kind == 12 ? 0 : 2, draw->source_group->transparent)->data;
     return object_texture_material_data(draw, 0);
+}
+
+// tree cards retain the main observer basis in every color and depth view
+static void prepare_billboard_instances(void)
+{
+    if (billboard_instances.count == 0 || (billboard_instances.serial == submit_lists.serial && billboard_instances.presentation == player_cube.presentation)) return;
+    if (billboard_instances.capacity < billboard_instances.count)
+    {
+        billboard_instances.capacity = scene_batch_capacity(billboard_instances.count);
+        XASSERT(billboard_instances.capacity <= 16384);
+        vid_tex_free(billboard_instances.texture);
+        billboard_instances.texture = vid_tex_create_fmt(4, billboard_instances.capacity, VID_RGBA32F);
+        XASSERT(billboard_instances.texture != NULL);
+    }
+    float *pixels = (float *)vid_tex_data(billboard_instances.texture);
+    for (uint32 index = 0; index < billboard_instances.count; ++index)
+    {
+        const HD_MODEL_DRAW *draw = &hd.model_draws[billboard_instances.draws[index]];
+        HD_POSE object, camera;
+        QUATF facing;
+        MATRIXF rotation, source, inverse, world;
+        hd_pose_interpolate(&draw->instance->poses.object[0], &draw->instance->poses.object[1], hd.render_phase, &object);
+        uint32 camera_facing = draw->model->kind == 12 && !draw->model->billboard_shadow_prepared;
+        if (draw->model->billboard_shadow_prepared && environment_shadow.card_basis_valid[draw->view])
+            world = environment_shadow.card_basis[draw->view];
+        else
+        {
+            SlerpQuatf(&draw->instance->poses.facing[0], &draw->instance->poses.facing[1], hd.render_phase, &facing);
+            QuatMatrixf(&facing, &rotation);
+            if (!camera_facing)
+            {
+            hd_pose_interpolate(&draw->instance->poses.camera[0], &draw->instance->poses.camera[1], hd.render_phase, &camera);
+            QuatMatrixf(&camera.rotation, &source);
+            IdentityMatrixf(&inverse);
+            for (uint32 row = 0; row < 3; ++row)
+                for (uint32 column = 0; column < 3; ++column) inverse.m[row][column] = source.m[column][row];
+            MulMatrix0f(&inverse, &rotation, &world);
+            }
+            else world = rotation;
+        }
+        for (uint32 row = 0; row < 3; ++row)
+        {
+            memcpy(pixels + draw->instance_row * 16 + row * 4, world.m[row], 3 * sizeof(float));
+            pixels[draw->instance_row * 16 + row * 4 + 3] = object.position.v[row];
+        }
+        pixels[draw->instance_row * 16 + 12] = (float)camera_facing;
+    }
+    vid_tex_commit_rows(billboard_instances.texture, 0, billboard_instances.count);
+    hd_work.billboard_rows += billboard_instances.count;
+    billboard_instances.serial = submit_lists.serial;
+    billboard_instances.presentation = player_cube.presentation;
+}
+
+// share only identical current membership; pass visibility remains independently owned
+static sint32 share_batch_geometry(HD_SCENE_BATCH_BANK *bank, uint32 phase, sint32 billboard)
+{
+    HD_SCENE_BATCH_BANK *heads[2 + HD_VIEWS] = {scene_batch_banks[0], scene_batch_banks[1]};
+    for (uint32 view = 0; view < HD_VIEWS; ++view) heads[2 + view] = planar.banks[view];
+    for (uint32 owner = 0; owner < 2 + HD_VIEWS; ++owner)
+        for (HD_SCENE_BATCH_BANK *other = heads[owner]; other; other = other->next)
+        {
+            if (other == bank || !other->storage || other->membership_serial != submit_lists.serial ||
+                other->membership_phase != phase || other->membership_billboard != (uint32)billboard || other->input_count != bank->input_count) continue;
+            uint32 input;
+            for (input = 0; input < bank->input_count; ++input)
+                if (memcmp(&bank->inputs[input], &other->inputs[input], offsetof(HD_BATCH_INPUT, group)) != 0) break;
+            if (input != bank->input_count) continue;
+            release_batch_geometry(bank->storage);
+            bank->storage = other->storage; ++bank->storage->refs;
+            bank->geometry = other->geometry; bank->indices = other->indices;
+            bank->vertex_capacity = other->vertex_capacity; bank->index_capacity = other->index_capacity;
+            if (bank->group_capacity < other->group_count)
+            {
+                uint32 old = bank->group_capacity;
+                bank->group_capacity = other->group_count;
+                bank->groups = (HD_SCENE_BATCH_GROUP *)realloc(bank->groups, bank->group_capacity * sizeof(*bank->groups));
+                XASSERT(bank->groups != NULL);
+                memset(bank->groups + old, 0, (bank->group_capacity - old) * sizeof(*bank->groups));
+            }
+            bank->group_count = other->group_count; bank->origin = other->origin; bank->instance_serial = 0;
+            for (uint32 group = 0; group < bank->group_count; ++group)
+            {
+                HD_SCENE_BATCH_GROUP *target = &bank->groups[group], *source = &other->groups[group];
+                VID_MATERIAL *material = target->material;
+                uint32 *indices = target->indices, capacity = target->capacity;
+                *target = *source; target->material = material; target->indices = indices; target->capacity = capacity;
+                if (!target->material) target->material = vid_mat_create();
+                XASSERT(target->material != NULL);
+                *vid_mat_data(target->material) = *vid_mat_read(source->material);
+                vid_mat_commit(target->material);
+            }
+            for (input = 0; input < bank->input_count; ++input) bank->inputs[input].group = other->inputs[input].group;
+            ++hd_work.shared_geometry;
+            return 1;
+        }
+    return 0;
 }
 
 static void submit_scene_batches(uint32 phase, sint32 billboard)
@@ -6499,14 +7947,35 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
     uint32 draw_index, total_vertices = 0, total_indices = 0, used_vertices = 0, used_indices = 0, group, input_index = 0;
     VID_VERTEX3D *vertices;
     uint32 *indices;
-    for (draw_index = 0; draw_index < hd.model_count; ++draw_index)
+    const uint32 *candidates = submit_lists.lists[phase * 2 + billboard];
+    uint32 candidate_count = submit_lists.counts[phase * 2 + billboard];
+    XASSERT(scene_batch_cursor != NULL);
+    if (*scene_batch_cursor == NULL)
+    {
+        *scene_batch_cursor = (HD_SCENE_BATCH_BANK *)calloc(1, sizeof(HD_SCENE_BATCH_BANK));
+        XASSERT(*scene_batch_cursor != NULL);
+    }
+    bank = *scene_batch_cursor;
+    if (bank != NULL && bank->membership_serial == submit_lists.serial && bank->membership_pass == color_pass.kind && bank->membership_phase == phase && bank->membership_billboard == (uint32)billboard)
+    {
+        scene_batch_cursor = &bank->next;
+        ++hd_work.static_batch_reuses;
+        ++hd_work.membership_hits;
+        goto dispatch;
+    }
+    ++hd_work.membership_checks;
+    for (uint32 candidate = 0; candidate < candidate_count && (draw_index = candidates[candidate], 1); ++candidate)
         if (scene_batch_eligible(&hd.model_draws[draw_index], phase) && (hd.model_draws[draw_index].model->kind >= 10) == billboard)
         {
             total_vertices += hd.model_draws[draw_index].model->batch_vertex_count;
             total_indices += source_draw_count(&hd.model_draws[draw_index]);
         }
     if (total_vertices == 0)
-        return;
+    {
+        scene_batch_cursor = &bank->next;
+        bank->input_count = bank->group_count = 0;
+        goto dispatch;
+    }
     XASSERT(scene_batch_cursor != NULL);
     if (*scene_batch_cursor == NULL)
     {
@@ -6515,24 +7984,10 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
     }
     bank = *scene_batch_cursor;
     scene_batch_cursor = &bank->next;
-    if (bank->vertex_capacity < total_vertices)
-    {
-        vid_mesh_free(bank->geometry);
-        bank->vertex_capacity = scene_batch_capacity(total_vertices);
-        bank->geometry = vid_mesh_create_3d(bank->vertex_capacity);
-        XASSERT(bank->geometry != NULL);
-    }
-    if (bank->index_capacity < total_indices)
-    {
-        vid_index_free(bank->indices);
-        bank->index_capacity = scene_batch_capacity(total_indices);
-        bank->indices = vid_index_create(bank->index_capacity);
-        XASSERT(bank->indices != NULL);
-    }
     {
         uint32 count = 0;
         sint32 reuse = bank->input_count != 0;
-        for (draw_index = 0; draw_index < hd.model_count; ++draw_index)
+        for (uint32 candidate = 0; candidate < candidate_count && (draw_index = candidates[candidate], 1); ++candidate)
         {
             const HD_MODEL_DRAW *draw = &hd.model_draws[draw_index];
             HD_BATCH_INPUT input;
@@ -6548,27 +8003,28 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
             }
             input.model = draw->model;
             input.source_group = draw->source_group;
-            input.texture = source_draw_material(draw)->texture;
-            input.position = billboard ? (VEC3F){0} : draw->poses.object[1].position;
+            input.texture = source_draw_material(draw, phase)->texture;
+            input.position = billboard ? (VEC3F){0} : draw->instance->poses.object[1].position;
             input.view = draw->view;
+            input.instance_row = billboard ? draw->instance_row : 0;
             if (draw->model->has_lighting)
             {
-                input.light_history = draw->light_history;
-                if (draw->light_history)
+                input.light_history = draw->instance->light_history;
+                if (draw->instance->light_history)
                 {
                     uint32 sample;
                     for (sample = 0; sample < 2; ++sample)
                     {
-                        memcpy(input.lighting[sample].world.m, draw->lighting[sample].world.m, sizeof(input.lighting[sample].world.m));
-                        memcpy(input.lighting[sample].color.m, draw->lighting[sample].color.m, sizeof(input.lighting[sample].color.m));
-                        memcpy(input.lighting[sample].ambient, draw->lighting[sample].ambient, sizeof(input.lighting[sample].ambient));
+                        memcpy(input.lighting[sample].world.m, draw->instance->lighting[sample].world.m, sizeof(input.lighting[sample].world.m));
+                        memcpy(input.lighting[sample].color.m, draw->instance->lighting[sample].color.m, sizeof(input.lighting[sample].color.m));
+                        memcpy(input.lighting[sample].ambient, draw->instance->lighting[sample].ambient, sizeof(input.lighting[sample].ambient));
                     }
                 }
                 else
                 {
-                    memcpy(input.light.m, draw->light.m, sizeof(input.light.m));
-                    memcpy(input.color.m, draw->color.m, sizeof(input.color.m));
-                    memcpy(input.ambient, draw->ambient, sizeof(input.ambient));
+                    memcpy(input.light.m, draw->instance->light.m, sizeof(input.light.m));
+                    memcpy(input.color.m, draw->instance->color.m, sizeof(input.color.m));
+                    memcpy(input.ambient, draw->instance->ambient, sizeof(input.ambient));
                 }
             }
             input.draw_index = draw_index;
@@ -6594,16 +8050,35 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
         bank->group_count = 0;
         bank->instance_serial = 0;
     }
-    if (billboard && bank->instance_capacity < bank->input_count)
+    if (share_batch_geometry(bank, phase, billboard)) goto dispatch;
+    if (bank->storage && bank->storage->refs > 1)
     {
-        vid_tex_free(bank->instances);
-        bank->instance_capacity = scene_batch_capacity(bank->input_count);
-        XASSERT(bank->instance_capacity <= 16384);
-        bank->instances = vid_tex_create_fmt(3, bank->instance_capacity, VID_RGBA32F);
-        XASSERT(bank->instances != NULL);
+        release_batch_geometry(bank->storage); bank->storage = NULL;
+        bank->geometry = NULL; bank->indices = NULL;
+        bank->vertex_capacity = bank->index_capacity = 0;
     }
+    if (!bank->storage)
+    {
+        bank->storage = (HD_BATCH_GEOMETRY *)calloc(1, sizeof(*bank->storage));
+        XASSERT(bank->storage != NULL); bank->storage->refs = 1;
+    }
+    if (bank->vertex_capacity < total_vertices)
+    {
+        vid_mesh_free(bank->geometry);
+        bank->vertex_capacity = scene_batch_capacity(total_vertices);
+        bank->geometry = vid_mesh_create_3d(bank->vertex_capacity);
+        XASSERT(bank->geometry != NULL);
+    }
+    if (bank->index_capacity < total_indices)
+    {
+        vid_index_free(bank->indices);
+        bank->index_capacity = scene_batch_capacity(total_indices);
+        bank->indices = vid_index_create(bank->index_capacity);
+        XASSERT(bank->indices != NULL);
+    }
+    bank->storage->geometry = bank->geometry; bank->storage->indices = bank->indices;
     vertices = vid_mesh_data_3d(bank->geometry);
-    for (draw_index = 0; draw_index < hd.model_count; ++draw_index)
+    for (uint32 candidate = 0; candidate < candidate_count && (draw_index = candidates[candidate], 1); ++candidate)
     {
         const HD_MODEL_DRAW *draw = &hd.model_draws[draw_index];
         const HD_MODEL *model = draw->model;
@@ -6617,9 +8092,9 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
         else
         {
             IdentityMatrixf(&transform);
-            transform.t[0] = draw->poses.object[1].position.x - bank->origin.x;
-            transform.t[1] = draw->poses.object[1].position.y - bank->origin.y;
-            transform.t[2] = draw->poses.object[1].position.z - bank->origin.z;
+            transform.t[0] = draw->instance->poses.object[1].position.x - bank->origin.x;
+            transform.t[1] = draw->instance->poses.object[1].position.y - bank->origin.y;
+            transform.t[2] = draw->instance->poses.object[1].position.z - bank->origin.z;
         }
         memcpy(vertices + used_vertices, model->batch_vertices, model->batch_vertex_count * sizeof(VID_VERTEX3D));
         for (vertex = 0; vertex < model->batch_vertex_count; ++vertex)
@@ -6631,11 +8106,11 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
             target->pos[1] = view.vy;
             target->pos[2] = view.vz;
             if (billboard)
-                target->pos[3] = -(float)(input_index + 1);
+                target->pos[3] = -(float)(draw->instance_row + 1);
         }
 
         {
-            const VID_MATERIAL_DATA *source = source_draw_material(draw);
+            const VID_MATERIAL_DATA *source = source_draw_material(draw, phase);
             HD_SCENE_BATCH_GROUP *target;
             uint32 index;
             XASSERT(source != NULL);
@@ -6670,7 +8145,8 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
                 XASSERT(data != NULL);
                 *data = *source;
                 data->shader = scene_batch_shader;
-                data->aux[0] = billboard ? bank->instances : NULL;
+                data->surface_write = 0;
+                data->aux[0] = billboard ? billboard_instances.texture : NULL;
                 data->params[4] = source->params[4];
                 data->params[5] = source->params[5];
                 data->params[6] = 0;
@@ -6709,37 +8185,35 @@ static void submit_scene_batches(uint32 phase, sint32 billboard)
     vid_mesh_commit(bank->geometry);
     vid_index_commit(bank->indices, used_indices);
 dispatch:
+    bank->membership_serial = submit_lists.serial;
+    bank->membership_pass = color_pass.kind;
+    bank->membership_phase = phase;
+    bank->membership_billboard = billboard;
     if (billboard && bank->instance_serial != player_cube.presentation)
     {
-        float *pixels = (float *)vid_tex_data(bank->instances);
-        XASSERT(pixels != NULL);
+        const float *pixels = (const float *)vid_tex_data(billboard_instances.texture);
         for (group = 0; group < bank->group_count; ++group)
             bank->groups[group].bounds_valid = 0;
         for (uint32 input = 0; input < bank->input_count; ++input)
         {
             const HD_MODEL_DRAW *draw = &hd.model_draws[bank->inputs[input].draw_index];
-            HD_POSE object;
-            QUATF facing;
-            MATRIXF rotation;
+            const float *sample = pixels + draw->instance_row * 16;
+            VEC3F position = {sample[3], sample[7], sample[11]};
             float radius = draw->model->bounds_radius;
-            hd_pose_interpolate(&draw->poses.object[0], &draw->poses.object[1], hd.render_phase, &object);
-            SlerpQuatf(&draw->poses.facing[0], &draw->poses.facing[1], hd.render_phase, &facing);
-            QuatMatrixf(&facing, &rotation);
-            for (uint32 row = 0; row < 3; ++row)
-            {
-                memcpy(pixels + input * 12 + row * 4, rotation.m[row], 3 * sizeof(float));
-                pixels[input * 12 + row * 4 + 3] = object.position.v[row];
-                radius += fabsf(draw->model->bounds_center.v[row]);
-            }
-            batch_bounds_add(&bank->groups[bank->inputs[input].group], object.position, radius);
+            for (uint32 row = 0; row < 3; ++row) radius += fabsf(draw->model->bounds_center.v[row]);
+            batch_bounds_add(&bank->groups[bank->inputs[input].group], position, radius);
         }
-        vid_tex_commit_rows(bank->instances, 0, bank->input_count);
         bank->instance_serial = player_cube.presentation;
     }
     for (group = 0; group < bank->group_count; ++group)
     {
         HD_SCENE_BATCH_GROUP *batch = &bank->groups[group];
         batch->reference = &hd.model_draws[bank->inputs[batch->reference_input].draw_index];
+        if (billboard && vid_mat_data(batch->material)->aux[0] != billboard_instances.texture)
+        {
+            vid_mat_data(batch->material)->aux[0] = billboard_instances.texture;
+            vid_mat_commit(batch->material);
+        }
         batch->geometry = bank->geometry;
         batch->index_buffer = bank->indices;
         submit_model(batch->reference, phase, batch);
@@ -6748,31 +8222,19 @@ dispatch:
 
 static void submit_world(void)
 {
-    uint32 phase, index;
-    for (index = 0; index < hd.model_count; ++index)
-    {
-        HD_MODEL_DRAW *draw = &hd.model_draws[index];
-        if (draw->model->texture_asset != NULL)
-        {
-            object_texture_material(draw, 0);
-            draw->texture_transparent = (uint8)draw->model->texture_asset->transparent;
-        }
-    }
-    for (index = hd.model_count; index > 0; --index)
-        if (hd.model_draws[index - 1].model->visibility != NULL)
-            submit_model(&hd.model_draws[index - 1], 0, NULL);
+    prepare_submit_lists();
+    prepare_billboard_instances();
+    for (uint32 item = submit_lists.counts[11]; item > 0; --item)
+        submit_model(&hd.model_draws[submit_lists.lists[11][item - 1]], 0, NULL);
     ++static_dispatch_serial;
-    for (phase = 0; phase < 3; ++phase)
+    for (uint32 phase = 0; phase < 3; ++phase)
     {
         if (phase < 2)
         {
-            for (index = 0; index < hd.model_count; ++index)
+            for (uint32 item = 0; item < submit_lists.counts[9 + phase]; ++item)
             {
-                const HD_MODEL_DRAW *draw = &hd.model_draws[index];
-                HD_STATIC_GROUP *group;
-                if (draw->source_group == NULL || draw->model->static_pool == NULL || draw->texture_transparent != (phase == 1))
-                    continue;
-                group = draw->source_group->static_group;
+                const HD_MODEL_DRAW *draw = &hd.model_draws[submit_lists.lists[9 + phase][item]];
+                HD_STATIC_GROUP *group = draw->source_group->static_group;
                 XASSERT(group != NULL);
                 if (group->submitted[draw->view] == static_dispatch_serial)
                     continue;
@@ -6780,18 +8242,117 @@ static void submit_world(void)
                 submit_model(draw, phase, &group->batch);
             }
             submit_scene_batches(phase, 0);
-            submit_scene_batches(phase, 1);
         }
-        for (index = 0; index < hd.model_count; ++index)
-        {
-            const HD_MODEL_DRAW *draw = &hd.model_draws[index];
-            if (draw->model->visibility != NULL || (phase < 2 && (draw->model->static_pool != NULL || scene_batch_eligible(draw, phase))))
-                continue;
-            if (phase < 2 || draw->dynamic != 0 || draw->model->has_transparent)
-                submit_model(draw, phase, NULL);
-        }
+        submit_scene_batches(phase, 1);
+        for (uint32 item = 0; item < submit_lists.counts[6 + phase]; ++item)
+            submit_model(&hd.model_draws[submit_lists.lists[6 + phase][item]], phase, NULL);
     }
     vid_fog(NULL);
+}
+
+static void collect_registered_lights(void)
+{
+    memset(local_lights.lamp_count, 0, sizeof(local_lights.lamp_count));
+    uint32 limit = HD_LOCAL_LAMPS / hd.views;
+    float activation = 16.0f * fmaxf(4096.0f, distance_lighting.radius);
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        uint32 player_slot = hd.views == 2 ? view : race_view.primary_car, base = view * limit;
+        const VEC3F *player = &hd.car_motion[view][player_slot].current.position;
+        sint32 cx = (sint32)floorf(player->x / 2048.0f), cz = (sint32)floorf(player->z / 2048.0f);
+        // scan each wrapped cell at most once; lamps take priority over legacy points
+        for (uint32 kind = 1; ; --kind)
+        {
+            sint32 reach = kind ? (sint32)ceilf(activation / 2048.0f) : 3;
+            uint32 span = (uint32)(reach * 2 + 1);
+            if (span > HD_LIGHT_CELL_AXIS)
+                span = HD_LIGHT_CELL_AXIS;
+            for (uint32 cell_index = 0; cell_index < local_lights.occupied_count; ++cell_index)
+            {
+                uint32 cell = local_lights.occupied_cells[cell_index];
+                uint32 x = (cell % HD_LIGHT_CELL_AXIS - (uint32)(cx - reach)) & (HD_LIGHT_CELL_AXIS - 1);
+                uint32 z = (cell / HD_LIGHT_CELL_AXIS - (uint32)(cz - reach)) & (HD_LIGHT_CELL_AXIS - 1);
+                if (x >= span || z >= span)
+                    continue;
+                for (sint32 item = local_lights.cells[cell]; item >= 0; item = local_lights.points[item].next)
+                {
+                    const HD_POINT_LIGHT *point = &local_lights.points[item];
+                    if (point->lamp != kind)
+                        continue;
+                    if (kind && !race_session.linear_course)
+                    {
+                        uint32 variant = track_stream_variant(point->section * 20, car_states[player_slot].track_location.node);
+                        if ((variant == 1 && point->category == 2) || (variant == 2 && point->category == 1))
+                            continue;
+                    }
+                    float dx = kind ? point->position.vx - player->x : lighting_delta(point->position.vx - player->x);
+                    float dy = kind ? point->position.vy - player->y : lighting_delta(point->position.vy - player->y);
+                    float dz = kind ? point->position.vz - player->z : lighting_delta(point->position.vz - player->z);
+                    float distance = dx * dx + dy * dy + dz * dz;
+                    float range = kind ? activation : point->radius;
+                    if (distance > range * range)
+                        continue;
+                    uint32 duplicate = 0;
+                    for (uint32 selected = 0; selected < local_lights.lamp_count[view]; ++selected)
+                    {
+                        const HD_POINT_LIGHT *other = &local_lights.points[local_lights.lamps[base + selected]];
+                        float x = point->position.vx - other->position.vx, y = point->position.vy - other->position.vy, z = point->position.vz - other->position.vz;
+                        if (other->lamp && (kind ? fabsf(x) + fabsf(y) + fabsf(z) < 1.0f : x * x + y * y + z * z < 256.0f * 256.0f))
+                            duplicate = 1;
+                    }
+                    if (duplicate)
+                        continue;
+                    uint32 target = local_lights.lamp_count[view];
+                    if (target == limit)
+                    {
+                        --target;
+                        const HD_POINT_LIGHT *last = &local_lights.points[local_lights.lamps[base + target]];
+                        if (last->lamp != kind || distance >= local_lights.lamp_distance[base + target])
+                            continue;
+                    }
+                    else
+                        ++local_lights.lamp_count[view];
+                    target += base;
+                    while (target > base && local_lights.points[local_lights.lamps[target - 1]].lamp == kind && distance < local_lights.lamp_distance[target - 1])
+                    {
+                        local_lights.lamps[target] = local_lights.lamps[target - 1];
+                        local_lights.lamp_distance[target] = local_lights.lamp_distance[target - 1];
+                        --target;
+                    }
+                    local_lights.lamps[target] = (uint32)item;
+                    local_lights.lamp_distance[target] = distance;
+                }
+            }
+            if (kind == 0)
+                break;
+        }
+    }
+}
+
+static void coalesce_wheel_draws(uint32 first, uint32 end)
+{
+    HD_MODEL_DRAW *previous = NULL;
+    for (uint32 index = first; index < end; ++index)
+    {
+        HD_MODEL_DRAW *draw = &hd.model_draws[index];
+        if (draw->kind != HD_COMMAND_SOLID || !draw->instance->poses.wheel_active)
+        {
+            previous = NULL;
+            continue;
+        }
+        if (previous != NULL && previous->first + previous->count == draw->first)
+        {
+            if (memcmp(&previous->source_group, &draw->source_group, offsetof(HD_MODEL_DRAW, first) - offsetof(HD_MODEL_DRAW, source_group)) == 0 &&
+                memcmp(&previous->instance->transform, &draw->instance->transform, sizeof(HD_MODEL_INSTANCE) - offsetof(HD_MODEL_INSTANCE, transform)) == 0 &&
+                memcmp(&previous->blend, &draw->blend, sizeof(*draw) - offsetof(HD_MODEL_DRAW, blend)) == 0)
+            {
+                previous->count += draw->count;
+                draw->count = 0;
+                continue;
+            }
+        }
+        previous = draw;
+    }
 }
 
 static void prepare_scene(void)
@@ -6802,12 +8363,14 @@ static void prepare_scene(void)
     if (hd.prepared)
         return;
     draw_split_separator();
+    invalidate_submit_lists();
+    memset(local_lights.lamp_count, 0, sizeof(local_lights.lamp_count));
     for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
         sun_shadow.cars[slot].reference = UINT32_MAX;
     for (index = 0; index < hd.model_count; ++index)
     {
         const HD_MODEL_DRAW *draw = &hd.model_draws[index];
-        if (draw->car_slot >= 0 && draw->car_slot < HD_SHADOW_CARS && draw->dynamic == 0 && draw->model->visibility == NULL && draw->model->batch_vertices != NULL && draw->source_order != 2 && (draw->source_group == NULL || draw->source_group == draw->model->source_groups))
+        if (draw->car_slot >= 0 && draw->car_slot < HD_SHADOW_CARS && draw->kind == HD_COMMAND_MODEL && draw->model->visibility == NULL && draw->model->batch_vertices != NULL && draw->source_order != 2 && (draw->source_group == NULL || draw->source_group == draw->model->source_groups))
         {
             HD_CAR_SHADOW *car = &sun_shadow.cars[draw->car_slot];
             if (car->reference == UINT32_MAX)
@@ -6992,13 +8555,25 @@ static void submit_minimap(const HD_UI_DRAW *draw)
     uniforms[5][0] = (float)view->reference.w;
     vid_viewport(view->viewport);
     vid_uniforms(&uniforms[0][0], 6);
-    shadow_pass(hd.map_materials[0]);
+    bind_scene_material(hd.map_materials[0]);
     vid_submit(draw->mesh->geometry, draw->mesh->indices, draw->first, draw->count);
     if (draw->blend != 0)
     {
-        shadow_pass(hd.map_materials[draw->blend]);
+        bind_scene_material(hd.map_materials[draw->blend]);
         vid_submit(draw->mesh->geometry, draw->mesh->indices, draw->first, draw->count);
     }
+}
+
+static void submit_resolved_world(void)
+{
+    if (!image_resolve_active || image_resolve_draws != hd.model_draws)
+    {
+        submit_world();
+        return;
+    }
+    for (uint32 view = 0; view < hd.views; ++view)
+        if (hd.viewports[view].viewport.w > 0 && hd.viewports[view].viewport.h > 0)
+            hd_post_submit(hd.viewports[view].viewport, view);
 }
 
 static void submit_scene(void)
@@ -7010,7 +8585,7 @@ static void submit_scene(void)
         uint32 count = draw->count;
         if (draw->layer != 0xFFFFFFFFu && (index == 0 || hd.ui_draws[index - 1].layer == 0xFFFFFFFFu))
         {
-            submit_world();
+            submit_resolved_world();
         }
         if (draw->map.active)
         {
@@ -7051,16 +8626,16 @@ static void submit_scene(void)
                 continue;
             vid_uniforms(layout, 4);
         }
-        shadow_pass(draw->sprite != NULL ? sprite_texture_material(draw->sprite, 0, 0) : draw->fading_out ? hd.ui_retire_materials[0] : hd.ui_materials[0]);
+        bind_scene_material(draw->sprite != NULL ? sprite_texture_material(draw->sprite, 0, 0) : draw->fading_out ? hd.ui_retire_materials[0] : hd.ui_materials[0]);
         vid_submit(draw->mesh->geometry, draw->mesh->indices, draw->first, count);
         if (draw->blend != 0)
         {
-            shadow_pass(draw->sprite != NULL ? sprite_texture_material(draw->sprite, draw->blend, 0) : draw->fading_out ? hd.ui_retire_materials[draw->blend] : hd.ui_materials[draw->blend]);
+            bind_scene_material(draw->sprite != NULL ? sprite_texture_material(draw->sprite, draw->blend, 0) : draw->fading_out ? hd.ui_retire_materials[draw->blend] : hd.ui_materials[draw->blend]);
             vid_submit(draw->mesh->geometry, draw->mesh->indices, draw->first, count);
         }
     }
     if (hd.ui_count == 0 || hd.ui_draws[hd.ui_count - 1].layer == 0xFFFFFFFFu)
-        submit_world();
+        submit_resolved_world();
 }
 
 static void swap_scene_buffers(HD_SCENE_BUFFERS *other)
@@ -7122,6 +8697,279 @@ static void submit_frozen_scene(void)
     hd.render_phase = menu_phase;
 }
 
+static void prepare_planar_targets(void)
+{
+    if (!effect_has_rain())
+        return;
+    sint32 width, height;
+    vid_resize(&width, &height);
+    uint32 views = race_session.two_players ? 2 : 1;
+    for (uint32 view = 0; view < views; ++view)
+    {
+        if (planar.target[view] == NULL)
+        {
+            planar.target[view] = vid_target_create_hdr();
+            XASSERT(planar.target[view] != NULL);
+            vid_tex_set_mip_levels(vid_target_texture(planar.target[view]), HD_PLANAR_MIPS);
+        }
+        sint32 w = (width + HD_PLANAR_DOWNSAMPLE - 1) / HD_PLANAR_DOWNSAMPLE, h = (height + HD_PLANAR_DOWNSAMPLE - 1) / HD_PLANAR_DOWNSAMPLE;
+        if (views == 2)
+        {
+            if (race_view.split_mode == 0)
+                h = (h + 1) / 2;
+            else
+                w = (w + 1) / 2;
+        }
+        if (w <= 0 || h <= 0)
+            continue;
+        hd_post_reflection_prepare(w, h);
+        if (!vid_begin(0, 0, 0))
+            continue;
+        if (vid_target_select_offscreen_size(planar.target[view], w, h))
+        {
+            sint32 completed = vid_end();
+            if (completed)
+                completed = hd_post_reflection_mips(planar.target[view], w, h, HD_PLANAR_MIPS);
+            XASSERT(completed);
+        }
+        else
+            vid_cancel();
+    }
+}
+
+static void update_planar_surfaces(void)
+{
+    if (planar.target[0] == NULL)
+        return;
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        uint32 slot = hd.views == 2 ? view : race_view.primary_car;
+        const CAR_STATE *car = &car_states[slot];
+        VEC3F points[6];
+        uint32 count = track_render_lane_triangles(car->track_location.node, car->track_location.lane, points);
+        HD_PLANAR_SURFACE surface = {0};
+        if (count == 0)
+        {
+            planar.serial[view] = 0;
+            continue;
+        }
+        float best = FLT_MAX;
+        for (uint32 triangle = 0; triangle < count; ++triangle)
+        {
+            VEC3F a = points[triangle * 3], b = points[triangle * 3 + 1], c = points[triangle * 3 + 2];
+            VEC3F ab = {{b.x - a.x, b.y - a.y, b.z - a.z}}, ac = {{c.x - a.x, c.y - a.y, c.z - a.z}};
+            VEC3F normal = {{ab.y * ac.z - ab.z * ac.y, ab.z * ac.x - ab.x * ac.z, ab.x * ac.y - ab.y * ac.x}};
+            float length = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+            if (length < 0.001f || fabsf(normal.y) < length * 0.2f)
+                continue;
+            float sign = normal.y < 0.0f ? -1.0f : 1.0f;
+            for (uint32 axis = 0; axis < 3; ++axis)
+                normal.v[axis] *= sign / length;
+            float x = car->pos.x / 256.0f, z = car->pos.z / 256.0f;
+            float denominator = ab.x * ac.z - ab.z * ac.x;
+            float u = ((x - a.x) * ac.z - (z - a.z) * ac.x) / denominator;
+            float v = (ab.x * (z - a.z) - ab.z * (x - a.x)) / denominator;
+            float outside = fmaxf(0.0f, -u) + fmaxf(0.0f, -v) + fmaxf(0.0f, u + v - 1.0f);
+            if (outside >= best)
+                continue;
+            best = outside;
+            surface.normal = (VEC3F){0.0f, 1.0f, 0.0f};
+            surface.point = (VEC3F){x, a.y - (normal.x * (x - a.x) + normal.z * (z - a.z)) / normal.y, z};
+        }
+        if (best == FLT_MAX)
+        {
+            planar.serial[view] = 0;
+            continue;
+        }
+        planar.surface[view][0] = planar.surface[view][1];
+        planar.surface[view][1] = surface;
+        if (planar.serial[view] + 1 != hd.motion_serial || planar.generation[view] != hd.motion_generation)
+            planar.surface[view][0] = surface;
+        planar.serial[view] = hd.motion_serial;
+        planar.generation[view] = hd.motion_generation;
+    }
+}
+
+static void capture_planar_reflections(void)
+{
+    float wet = hd.wetness[0] + hd.render_phase * (hd.wetness[1] - hd.wetness[0]);
+    if (wet <= 0.0f)
+    {
+        memset(planar.ready, 0, sizeof(planar.ready));
+        return;
+    }
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        sint32 width = (hd.viewports[view].viewport.w + HD_PLANAR_DOWNSAMPLE - 1) / HD_PLANAR_DOWNSAMPLE, height = (hd.viewports[view].viewport.h + HD_PLANAR_DOWNSAMPLE - 1) / HD_PLANAR_DOWNSAMPLE;
+        if (hd.paused && planar.paused && planar.ready[view] && width == planar.width[view] && height == planar.height[view])
+            continue;
+        planar.ready[view] = 0;
+        if (width <= 0 || height <= 0 || planar.target[view] == NULL || planar.serial[view] == 0)
+            continue;
+        const HD_MODEL_DRAW *reference = NULL;
+        for (uint32 index = 0; index < hd.model_count; ++index)
+        {
+            const HD_MODEL_DRAW *draw = &hd.model_draws[index];
+            if (draw->view == view && draw->model->visibility == NULL && !draw->instance->poses.view_geometry && !draw->instance->poses.relative && draw->kind == HD_COMMAND_MODEL && draw->model->kind < 10)
+            {
+                reference = draw;
+                break;
+            }
+        }
+        if (reference == NULL)
+            continue;
+        HD_POSE camera;
+        MATRIXF main;
+        hd_pose_interpolate(&reference->instance->poses.camera[0], &reference->instance->poses.camera[1], hd.render_phase, &camera);
+        QuatMatrixf(&camera.rotation, &main);
+        VEC3F normal, point;
+        float length = 0.0f;
+        for (uint32 axis = 0; axis < 3; ++axis)
+        {
+            normal.v[axis] = planar.surface[view][0].normal.v[axis] + hd.render_phase * (planar.surface[view][1].normal.v[axis] - planar.surface[view][0].normal.v[axis]);
+            point.v[axis] = planar.surface[view][0].point.v[axis] + hd.render_phase * (planar.surface[view][1].point.v[axis] - planar.surface[view][0].point.v[axis]);
+            length += normal.v[axis] * normal.v[axis];
+        }
+        if (length < 0.0001f)
+            continue;
+        length = sqrtf(length);
+        float distance = 0.0f;
+        for (uint32 axis = 0; axis < 3; ++axis)
+        {
+            normal.v[axis] /= length;
+            distance += normal.v[axis] * (camera.position.v[axis] - point.v[axis]);
+        }
+        // a camera on or below this road plane has no valid reflected view
+        if (distance <= 4.0f)
+            continue;
+        planar.camera = camera;
+        planar.view = view;
+        VEC3F view_normal = {{0}};
+        for (uint32 row = 0; row < 3; ++row)
+        {
+            planar.camera.position.v[row] -= 2.0f * distance * normal.v[row];
+            float component = 0.0f;
+            for (uint32 axis = 0; axis < 3; ++axis)
+                component += main.m[row][axis] * normal.v[axis];
+            planar.receiver[view][row] = component;
+            for (uint32 axis = 0; axis < 3; ++axis)
+            {
+                planar.matrix.m[row][axis] = main.m[row][axis] - 2.0f * component * normal.v[axis];
+                view_normal.v[row] += planar.matrix.m[row][axis] * normal.v[axis];
+            }
+        }
+        planar.receiver[view][3] = distance;
+        const HD_VIEW *viewport = &hd.viewports[view];
+        HD_PROJECTION projection = interpolated_projection(reference->instance->projection);
+        float aspect = (float)viewport->viewport.w / viewport->viewport.h;
+        float sx = 2.0f * projection.x / viewport->reference.w * viewport->reference_aspect / aspect;
+        float sy = 2.0f * projection.y / viewport->reference.h;
+        float ox = 2.0f * (projection.center_x - viewport->reference.x) / viewport->reference.w - 1.0f;
+        float oy = 1.0f - 2.0f * (projection.center_y - viewport->reference.y) / viewport->reference.h;
+        float plane_d = -distance - 2.0f;
+        // use the opposite far clip corner of this positive-Z, inverted-Y projection
+        float qx = ((view_normal.x >= 0.0f ? 1.0f : -1.0f) - ox) / sx;
+        float qy = (oy + (view_normal.y >= 0.0f ? 1.0f : -1.0f)) / sy;
+        float denominator = view_normal.x * qx + view_normal.y * qy + view_normal.z + plane_d / reference->far_plane;
+        if (denominator <= 0.00001f)
+            continue;
+        float scale = 2.0f / denominator;
+        for (uint32 axis = 0; axis < 3; ++axis)
+            planar.oblique[axis] = view_normal.v[axis] * scale - (axis == 2 ? 1.0f : 0.0f);
+        planar.oblique[3] = plane_d * scale;
+        float transform[3][4] = {{0}};
+        for (uint32 row = 0; row < 3; ++row)
+        {
+            for (uint32 column = 0; column < 3; ++column)
+                for (uint32 axis = 0; axis < 3; ++axis)
+                    transform[row][column] += planar.matrix.m[row][axis] * main.m[column][axis];
+            for (uint32 axis = 0; axis < 3; ++axis)
+                transform[row][3] += planar.matrix.m[row][axis] * (camera.position.v[axis] - planar.camera.position.v[axis]);
+        }
+        for (uint32 column = 0; column < 4; ++column)
+        {
+            planar.projection[view][0][column] = sx * transform[0][column] + ox * transform[2][column];
+            planar.projection[view][1][column] = -sy * transform[1][column] + oy * transform[2][column];
+            planar.projection[view][2][column] = transform[2][column];
+        }
+        if (!vid_begin(hd.clear[0], hd.clear[1], hd.clear[2]))
+            continue;
+        if (!vid_target_select_offscreen_size(planar.target[view], width, height))
+        {
+            vid_cancel();
+            continue;
+        }
+        HD_VIEW saved[HD_VIEWS];
+        memcpy(saved, hd.viewports, sizeof(saved));
+        hd.viewports[view].viewport = (VID_RECT){0, 0, width, height};
+        set_color_pass(HD_PASS_PLANAR, &planar.camera, &planar.matrix);
+        scene_batch_cursor = &planar.banks[view];
+        submit_world();
+        set_color_pass(HD_PASS_MAIN, NULL, NULL);
+        planar.ready[view] = vid_end() != 0;
+        if (planar.ready[view])
+            planar.ready[view] = hd_post_reflection_mips(planar.target[view], width, height, HD_PLANAR_MIPS);
+        memcpy(hd.viewports, saved, sizeof(saved));
+        planar.width[view] = width;
+        planar.height[view] = height;
+        planar.captures += planar.ready[view];
+    }
+    planar.paused = hd.paused;
+}
+
+static void capture_resolved_world(void)
+{
+    sint32 width = hd.width, height = hd.height;
+    float phase = hd.render_phase;
+    VID_RECT views[HD_VIEWS];
+    image_resolve_active = 0;
+    if ((!hd.race_frame && !hd.paused) || width <= 0 || height <= 0)
+        return;
+    if (hd.paused)
+    {
+        hd.render_phase = hd.pause_phase;
+        swap_scene_buffers(&hd.frozen);
+        hd.width = width;
+        hd.height = height;
+        for (uint32 view = 0; view < hd.views; ++view)
+        {
+            const VID_RECT *r = &hd.viewports[view].reference;
+            hd.viewports[view].viewport = (VID_RECT){(sint32)((sint64)width * r->x / model_render.width), (sint32)((sint64)height * r->y / model_render.height), (sint32)((sint64)width * (r->x + r->w) / model_render.width) - (sint32)((sint64)width * r->x / model_render.width), (sint32)((sint64)height * (r->y + r->h) / model_render.height) - (sint32)((sint64)height * r->y / model_render.height)};
+        }
+    }
+    if (hd.paused && paused_world.ready && paused_world.owner == hd.model_draws && paused_world.generation == hd.motion_generation &&
+        paused_world.width == width && paused_world.height == height && paused_world.phase == hd.render_phase)
+    {
+        ++hd_work.paused_world_reuses;
+        image_resolve_active = 1; image_resolve_draws = hd.model_draws;
+        swap_scene_buffers(&hd.frozen); hd.render_phase = phase;
+        return;
+    }
+    for (uint32 view = 0; view < hd.views; ++view)
+        views[view] = hd.viewports[view].viewport;
+    capture_planar_reflections();
+    if (hd_post_world_begin(width, height, hd.clear))
+    {
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
+        submit_world();
+        image_resolve_active = hd_post_world_end(views, hd.views);
+        if (image_resolve_active)
+            image_resolve_draws = hd.model_draws;
+        XASSERT(image_resolve_active);
+    }
+    paused_world.ready = hd.paused && image_resolve_active;
+    if (paused_world.ready)
+    {
+        paused_world.owner = hd.model_draws; paused_world.generation = hd.motion_generation;
+        paused_world.width = width; paused_world.height = height; paused_world.phase = hd.render_phase;
+    }
+    if (hd.paused)
+    {
+        swap_scene_buffers(&hd.frozen);
+        hd.render_phase = phase;
+    }
+}
+
 void hd_reseed_race(void)
 {
     ++hd.motion_generation;
@@ -7133,7 +8981,7 @@ static void prepare_shadow_target(void)
     if (!sun_shadow.target)
     {
         VID_MATERIAL_DATA *data;
-        sun_shadow.target = vid_target_create_depth_array(HD_SHADOW_RESOLUTION, HD_SHADOW_LAYERS);
+        sun_shadow.target = vid_target_create_depth_array(HD_SHADOW_RESOLUTION, HD_SHADOW_LAYERS + HD_LOCAL_LAMPS);
         sun_shadow.shader = vid_shader_create(shadow_depth_vertex_source, shadow_depth_fragment_source);
         sun_shadow.material = vid_mat_create();
         XASSERT(sun_shadow.target && sun_shadow.shader && sun_shadow.material);
@@ -7145,9 +8993,372 @@ static void prepare_shadow_target(void)
     }
 }
 
+static void prepare_environment_shadow(void)
+{
+    if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+        return;
+    if (environment_shadow.target != NULL && environment_shadow.target_views == hd.views)
+        return;
+    vid_target_free(environment_shadow.target);
+    environment_shadow.ready = 0;
+    environment_shadow.target_views = hd.views;
+    environment_shadow.target = vid_target_create_depth_array(HD_ENV_SHADOW_RESOLUTION, hd.views * HD_ENV_SHADOW_CASCADES);
+    if (environment_shadow.shader == NULL)
+    {
+        environment_shadow.shader = vid_shader_create_array(environment_depth_vertex_source, environment_depth_fragment_source);
+        environment_shadow.billboard_shader = vid_shader_create_array(billboard_depth_vertex_source, environment_depth_fragment_source);
+    }
+    XASSERT(environment_shadow.target != NULL && environment_shadow.shader != NULL && environment_shadow.billboard_shader != NULL);
+    environment_shadow.split = TD5_HD_CASCADE_CARS ? 8000.0f : 24000.0f;
+    environment_shadow.far = 0.0f;
+}
+
+static void prepare_billboard_shadow_facing(void)
+{
+    float phase = hd.paused ? hd.pause_phase : hd.render_phase;
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        HD_POSE view_camera;
+        MATRIXF camera_rotation;
+        hd_pose_interpolate(&hd.camera_motion[view].previous, &hd.camera_motion[view].current, phase, &view_camera);
+        QuatMatrixf(&view_camera.rotation, &camera_rotation);
+        float x = camera_rotation.m[0][0], z = camera_rotation.m[0][2];
+        float length = sqrtf(x * x + z * z);
+        if (length > 0.00001f)
+        {
+            x /= length;
+            z /= length;
+        }
+        else
+        {
+            x = 1.0f;
+            z = 0.0f;
+        }
+        IdentityMatrixf(&environment_shadow.card_basis[view]);
+        environment_shadow.card_basis[view].m[0][0] = x;
+        environment_shadow.card_basis[view].m[0][2] = -z;
+        environment_shadow.card_basis[view].m[2][0] = z;
+        environment_shadow.card_basis[view].m[2][2] = x;
+        environment_shadow.card_basis_valid[view] = 1;
+        for (uint32 item = 0; item < hd.model_count; ++item)
+        {
+            const HD_MODEL_DRAW *draw = &hd.model_draws[item];
+            if (draw->view != view || !draw->model->billboard_shadow_prepared || !draw->instance->poses.billboard)
+                continue;
+            HD_POSE camera;
+            QUATF facing;
+            MATRIXF camera_matrix, inverse, view_facing;
+            hd_pose_interpolate(&draw->instance->poses.camera[0], &draw->instance->poses.camera[1], phase, &camera);
+            QuatMatrixf(&camera.rotation, &camera_matrix);
+            SlerpQuatf(&draw->instance->poses.facing[0], &draw->instance->poses.facing[1], phase, &facing);
+            QuatMatrixf(&facing, &view_facing);
+            IdentityMatrixf(&inverse);
+            for (uint32 row = 0; row < 3; ++row)
+                for (uint32 column = 0; column < 3; ++column)
+                    inverse.m[row][column] = camera_matrix.m[column][row];
+            MulMatrix0f(&inverse, &view_facing, &environment_shadow.card_basis[view]);
+            environment_shadow.card_basis_valid[view] = 1;
+            break;
+        }
+    }
+}
+
+static void capture_cascade_cars(uint32 view, uint32 cascade);
+
+static void capture_environment_shadow(void)
+{
+    if (!hd.race_frame || hd.paused || !environment_shadow.target)
+        return;
+    environment_shadow.ready = 0;
+    if (!sun_shadow.ready || (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+        return;
+    if (memcmp(&environment_shadow.basis, &sun_shadow.basis, sizeof(MATRIXF)) != 0)
+        for (HD_STATIC_POOL *pool = static_pools; pool != NULL; pool = pool->next)
+            pool->light_bounds_ready = 0;
+    environment_shadow.basis = sun_shadow.basis;
+    for (HD_STATIC_POOL *pool = static_pools; pool != NULL; pool = pool->next)
+    {
+        if (pool->light_bounds_ready)
+            continue;
+        for (uint32 row = 0; row < 3; ++row)
+        {
+            pool->light_min[row] = FLT_MAX;
+            pool->light_max[row] = -FLT_MAX;
+        }
+        for (uint32 group = 0; group < pool->group_count; ++group)
+        {
+            const HD_SCENE_BATCH_GROUP *batch = &pool->groups[group].batch;
+            for (uint32 row = 0; row < 3; ++row)
+            {
+                float lower = 0.0f, upper = 0.0f;
+                for (uint32 axis = 0; axis < 3; ++axis)
+                {
+                    float a = environment_shadow.basis.m[row][axis] * (batch->bounds_min.v[axis] + pool->origin.v[axis]);
+                    float b = environment_shadow.basis.m[row][axis] * (batch->bounds_max.v[axis] + pool->origin.v[axis]);
+                    lower += fminf(a, b);
+                    upper += fmaxf(a, b);
+                }
+                pool->light_min[row] = fminf(pool->light_min[row], lower);
+                pool->light_max[row] = fmaxf(pool->light_max[row], upper);
+            }
+        }
+        pool->light_bounds_ready = 1;
+    }
+    if (environment_shadow.pool_generation != static_pool_generation)
+    {
+        uint32 pool_count = 0, section_count = 0;
+        for (HD_STATIC_POOL *pool = static_pools; pool; pool = pool->next)
+        {
+            ++pool_count; if (section_count <= pool->track_section) section_count = pool->track_section + 1;
+        }
+        environment_shadow.pools = (HD_STATIC_POOL **)realloc(environment_shadow.pools, pool_count * sizeof(HD_STATIC_POOL *));
+        XASSERT(environment_shadow.pools || pool_count == 0);
+        environment_shadow.pool_count = 0;
+        for (HD_STATIC_POOL *pool = static_pools; pool; pool = pool->next) environment_shadow.pools[environment_shadow.pool_count++] = pool;
+        if (pool_count > environment_shadow.candidate_capacity)
+        {
+            environment_shadow.candidate_capacity = pool_count;
+            for (uint32 view = 0; view < HD_VIEWS; ++view)
+                for (uint32 cascade = 0; cascade < HD_ENV_SHADOW_CASCADES; ++cascade)
+                {
+                    environment_shadow.candidates[view][cascade] = (HD_STATIC_POOL **)realloc(environment_shadow.candidates[view][cascade], pool_count * sizeof(HD_STATIC_POOL *));
+                    XASSERT(environment_shadow.candidates[view][cascade] != NULL);
+                }
+        }
+        if (section_count > environment_shadow.category_capacity)
+        {
+            uint32 previous = environment_shadow.category_capacity;
+            environment_shadow.category_capacity = section_count;
+            for (uint32 view = 0; view < HD_VIEWS; ++view)
+            {
+                environment_shadow.categories[view] = (uint32 *)realloc(environment_shadow.categories[view], section_count * sizeof(uint32));
+                environment_shadow.category_stamps[view] = (uint64 *)realloc(environment_shadow.category_stamps[view], section_count * sizeof(uint64));
+                XASSERT(environment_shadow.categories[view] && environment_shadow.category_stamps[view]);
+                memset(environment_shadow.category_stamps[view] + previous, 0, (section_count - previous) * sizeof(uint64));
+            }
+        }
+        environment_shadow.pool_generation = static_pool_generation;
+    }
+    if (environment_shadow.category_generation != hd.motion_generation)
+    {
+        for (uint32 view = 0; view < HD_VIEWS; ++view) memset(environment_shadow.category_stamps[view], 0, environment_shadow.category_capacity * sizeof(uint64));
+        environment_shadow.category_generation = hd.motion_generation;
+    }
+    environment_shadow.far = fminf(hd_track_horizon(), 64000.0f);
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        HD_POSE camera;
+        MATRIXF rotation;
+        hd_pose_interpolate(&hd.camera_motion[view].previous, &hd.camera_motion[view].current, hd.render_phase, &camera);
+        QuatMatrixf(&camera.rotation, &rotation);
+        const HD_VIEW *viewport = &hd.viewports[view];
+        HD_PROJECTION samples[2] = {hd.projection_motion[view].previous, hd.projection_motion[view].current};
+        HD_PROJECTION projection = interpolated_projection(samples);
+        float aspect = (float)viewport->viewport.w / viewport->viewport.h;
+        float sx = 2.0f * projection.x / viewport->reference.w * viewport->reference_aspect / aspect;
+        float sy = 2.0f * projection.y / viewport->reference.h;
+        float ox = 2.0f * (projection.center_x - viewport->reference.x) / viewport->reference.w - 1.0f;
+        float oy = 1.0f - 2.0f * (projection.center_y - viewport->reference.y) / viewport->reference.h;
+        XASSERT(sx > 0.0f && sy > 0.0f);
+        for (uint32 cascade = 0; cascade < HD_ENV_SHADOW_CASCADES; ++cascade)
+        {
+            float near = cascade == 0 ? 1.0f : environment_shadow.split * 0.8f;
+            float far = cascade == 0 ? environment_shadow.split : environment_shadow.far;
+            float middle = (near + far) * 0.5f;
+            VEC3F local = {{-ox * middle / sx, oy * middle / sy, middle}}, focus;
+            float radius2 = 0.0f;
+            for (uint32 corner = 0; corner < 8; ++corner)
+            {
+                float z = (corner & 4) != 0 ? far : near;
+                float x = (((corner & 1) != 0 ? 1.0f : -1.0f) - ox) * z / sx - local.x;
+                float y = -(((corner & 2) != 0 ? 1.0f : -1.0f) - oy) * z / sy - local.y;
+                radius2 = fmaxf(radius2, x * x + y * y + (z - middle) * (z - middle));
+            }
+            if (cascade == 0 && TD5_HD_CASCADE_CARS)
+                local.z += environment_shadow.split * 0.25f;
+            if (cascade != 0)
+            {
+                // radial fog bounds the visible frustum before the projection far plane
+                VEC3F axis = {{-ox / sx, oy / sy, 1.0f}};
+                float length = sqrtf(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                for (uint32 component = 0; component < 3; ++component)
+                    axis.v[component] /= length;
+                float cosine = 1.0f;
+                for (uint32 corner = 0; corner < 4; ++corner)
+                {
+                    VEC3F ray = {{(((corner & 1) != 0 ? 1.0f : -1.0f) - ox) / sx, -(((corner & 2) != 0 ? 1.0f : -1.0f) - oy) / sy, 1.0f}};
+                    float ray_length = sqrtf(ray.x * ray.x + ray.y * ray.y + ray.z * ray.z);
+                    cosine = fminf(cosine, (axis.x * ray.x + axis.y * ray.y + axis.z * ray.z) / ray_length);
+                }
+                float distance = cosine < 0.70710678f ? far * cosine : far / (2.0f * cosine);
+                for (uint32 component = 0; component < 3; ++component)
+                    local.v[component] = axis.v[component] * distance;
+                radius2 = fmaxf(distance * distance, far * far + distance * distance - 2.0f * far * distance * cosine);
+            }
+            // a rotation-independent sphere keeps cascade density stable while steering
+            float extent = -floorf(-2.0f * sqrtf(radius2) * HD_ENV_SHADOW_RESOLUTION / (HD_ENV_SHADOW_RESOLUTION - 8) / 256.0f) * 256.0f;
+            environment_shadow.extent[view][cascade] = extent;
+            float texel = extent / HD_ENV_SHADOW_RESOLUTION;
+            for (uint32 axis = 0; axis < 3; ++axis)
+            {
+                focus.v[axis] = camera.position.v[axis];
+                for (uint32 row = 0; row < 3; ++row)
+                    focus.v[axis] += rotation.m[row][axis] * local.v[row];
+            }
+            for (uint32 row = 0; row < 3; ++row)
+            {
+                float center = 0.0f;
+                for (uint32 axis = 0; axis < 3; ++axis)
+                    center += environment_shadow.basis.m[row][axis] * focus.v[axis];
+                environment_shadow.center[view][cascade][row] = row == 2 ? center : floorf(center / texel + 0.5f) * texel;
+            }
+            float receiver_max = environment_shadow.center[view][cascade][2] + sqrtf(radius2);
+            float low = FLT_MAX, high = -FLT_MAX;
+            environment_shadow.candidate_count[view][cascade] = 0;
+            for (uint32 pool_index = 0; pool_index < environment_shadow.pool_count; ++pool_index)
+            {
+                HD_STATIC_POOL *pool = environment_shadow.pools[pool_index];
+                if (pool->light_max[0] < environment_shadow.center[view][cascade][0] - extent * 0.5f || pool->light_min[0] > environment_shadow.center[view][cascade][0] + extent * 0.5f || pool->light_max[1] < environment_shadow.center[view][cascade][1] - extent * 0.5f || pool->light_min[1] > environment_shadow.center[view][cascade][1] + extent * 0.5f)
+                    continue;
+                environment_shadow.candidates[view][cascade][environment_shadow.candidate_count[view][cascade]++] = pool;
+                // retain lightward offscreen casters and the road below moving receivers
+                low = fminf(low, pool->light_min[2]);
+                high = fmaxf(high, pool->light_max[2]);
+            }
+            if (low == FLT_MAX)
+            {
+                low = environment_shadow.center[view][cascade][2] - sqrtf(radius2);
+                high = receiver_max;
+            }
+            if (TD5_HD_CASCADE_CARS)
+                for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+                {
+                    const HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+                    if (!car->active)
+                        continue;
+                    float radius = car->body->bounds_radius + 128.0f;
+                    for (uint32 axis = 0; axis < 3; ++axis)
+                        radius += fabsf(car->body->bounds_center.v[axis]);
+                    if (fabsf(car->center[0] - environment_shadow.center[view][cascade][0]) > extent * 0.5f + radius ||
+                        fabsf(car->center[1] - environment_shadow.center[view][cascade][1]) > extent * 0.5f + radius)
+                        continue;
+                    low = fminf(low, car->center[2] - radius);
+                    high = fmaxf(high, car->center[2] + radius);
+                }
+            low -= 2048.0f;
+            high = fminf(high, receiver_max) + 2048.0f;
+            environment_shadow.depth[view][cascade] = fmaxf(4096.0f, high - low);
+            environment_shadow.center[view][cascade][2] = (high + low) * 0.5f;
+        }
+    }
+    if (!vid_begin(0, 0, 0))
+        return;
+    for (uint32 view = 0; view < hd.views; ++view)
+    {
+        for (uint32 cascade = 0; cascade < HD_ENV_SHADOW_CASCADES; ++cascade)
+        {
+            float extent = environment_shadow.extent[view][cascade];
+            uint32 layer = view * HD_ENV_SHADOW_CASCADES + cascade;
+            sint32 selected = layer == 0 ? vid_target_select_depth_layer(environment_shadow.target, layer) : vid_target_next_part(layer);
+            XASSERT(selected);
+            if (!selected)
+            {
+                vid_cancel();
+                return;
+            }
+            vid_viewport((VID_RECT){0, 0, HD_ENV_SHADOW_RESOLUTION, HD_ENV_SHADOW_RESOLUTION});
+            for (uint32 candidate = 0; candidate < environment_shadow.candidate_count[view][cascade]; ++candidate)
+            {
+                HD_STATIC_POOL *pool = environment_shadow.candidates[view][cascade][candidate];
+                uint32 outside = 0;
+                for (uint32 row = 0; row < 3; ++row)
+                {
+                    float half = (row == 2 ? environment_shadow.depth[view][cascade] : extent) * 0.5f;
+                    outside |= pool->light_max[row] < environment_shadow.center[view][cascade][row] - half || pool->light_min[row] > environment_shadow.center[view][cascade][row] + half;
+                }
+                if (outside)
+                    continue;
+                uint32 section = pool->track_section;
+                if (environment_shadow.category_stamps[view][section] != hd.motion_serial)
+                {
+                    uint32 slot = hd.views == 2 ? view : race_view.primary_car;
+                    uint32 variant = race_session.linear_course ? 3 : track_stream_variant((sint32)(section * 20), car_states[slot].track_location.node);
+                    environment_shadow.categories[view][section] = variant == 1 ? 1 : variant == 2 ? 2 : 3;
+                    environment_shadow.category_stamps[view][section] = hd.motion_serial;
+                }
+                uint32 categories = environment_shadow.categories[view][section];
+                float uniforms[6][4] = {{0}};
+                for (uint32 row = 0; row < 3; ++row)
+                {
+                    float scale = (row == 1 ? -2.0f : 2.0f) / (row == 2 ? environment_shadow.depth[view][cascade] : extent);
+                    for (uint32 axis = 0; axis < 3; ++axis)
+                    {
+                        uniforms[row][axis] = environment_shadow.basis.m[row][axis] * scale;
+                        uniforms[row][3] += uniforms[row][axis] * pool->origin.v[axis];
+                    }
+                    uniforms[row][3] -= scale * environment_shadow.center[view][cascade][row];
+                }
+                for (uint32 row = 0; row < 3; ++row)
+                    memcpy(uniforms[3 + row], environment_shadow.card_basis[view].m[row], 3 * sizeof(float));
+                vid_uniforms(&uniforms[0][0], pool->billboard ? 6 : 3);
+                for (uint32 group = 0; group < pool->group_count; ++group)
+                {
+                    const HD_STATIC_GROUP *part = &pool->groups[group];
+                    if (part->depth_count == 0)
+                        continue;
+                    if ((categories & (1u << part->category)) == 0)
+                        continue;
+                    vid_pass(part->depth_material);
+                    vid_submit(pool->geometry, pool->depth_indices, part->depth_first, part->depth_count);
+                    ++environment_shadow.draws;
+                    environment_shadow.billboard_draws += pool->billboard;
+                }
+            }
+            if (TD5_HD_CASCADE_CARS)
+                capture_cascade_cars(view, cascade);
+        }
+    }
+    environment_shadow.ready = vid_end() != 0;
+    if (environment_shadow.ready)
+        ++environment_shadow.captures;
+}
+
+static void prepare_tyre_color(uint32 slot)
+{
+    if (slot >= CAR_RACE_MODEL_COUNT || tyre_models[slot].geometry != NULL)
+        return;
+    HD_MODEL *model = &tyre_models[slot];
+    model->geometry = vid_mesh_create_2d(48);
+    model->indices = vid_index_create(48);
+    model->index_count = 48;
+    XASSERT(model->geometry && model->indices);
+    VID_VERTEX2D *vertices = vid_mesh_data_2d(model->geometry);
+    uint32 *indices = vid_index_data(model->indices);
+    SVECTOR sides[18];
+    wheels_hd_shadow_sides(slot, sides);
+    static const uint8 order[6] = {0, 1, 2, 1, 3, 2};
+    memset(vertices, 0, 48 * sizeof(*vertices));
+    for (uint32 segment = 0; segment < 8; ++segment)
+        for (uint32 vertex = 0; vertex < 6; ++vertex)
+        {
+            uint32 index = segment * 6 + vertex;
+            const SVECTOR *point = &sides[segment * 2 + order[vertex]];
+            vertices[index].pos[0] = point->vx;
+            vertices[index].pos[1] = point->vy;
+            vertices[index].pos[2] = point->vz;
+            vertices[index].alpha = 1.0f;
+            indices[index] = index;
+        }
+    vid_mesh_commit(model->geometry);
+    vid_index_commit(model->indices, 48);
+    vid_mesh_static(model->geometry);
+    vid_index_static(model->indices);
+}
+
 static void prepare_car_shadow(uint32 slot, HD_MODEL *model)
 {
     HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+    prepare_tyre_color(slot);
     uint32 tyre_vertices = slot < CAR_RACE_MODEL_COUNT ? 4 * 8 * 12 : 0;
     uint32 vertex_count = model->batch_vertex_count + tyre_vertices;
     uint32 index_count = model->index_count + tyre_vertices;
@@ -7193,14 +9404,26 @@ static void prepare_car_shadow(uint32 slot, HD_MODEL *model)
     vid_index_static(car->indices);
 }
 
-static void submit_car_shadow(uint32 slot)
+typedef struct HD_DEPTH_VIEW
+{
+    MATRIXF rotation;
+    VEC3F position;
+    float projection[4];
+    uint32 resolution;
+} HD_DEPTH_VIEW;
+
+static void prepare_car_presentation(uint32 slot)
 {
     HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+    if (car->presentation == player_cube.presentation || car->reference == UINT32_MAX || car->geometry == NULL)
+        return;
     const HD_MODEL_DRAW *draw = &hd.model_draws[car->reference];
-    MATRIXF body = interpolated_transform(draw);
-    float uniforms[16][4] = {{0}};
-    XASSERT(car->body == draw->model);
-    for (uint32 part = 0; part < (slot < CAR_RACE_MODEL_COUNT ? 5u : 1u); ++part)
+    memcpy(car->inputs, draw->instance->poses.object, sizeof(car->inputs));
+    hd_pose_interpolate(&car->inputs[0], &car->inputs[1], hd.render_phase, &car->pose);
+    MATRIXF body;
+    QuatMatrixf(&car->pose.rotation, &body);
+    memcpy(body.t, &car->pose.position, sizeof(body.t));
+    for (uint32 part = 0; part < (slot < CAR_RACE_MODEL_COUNT ? HD_SHADOW_TRANSFORMS : 1u); ++part)
     {
         MATRIXF transform = body;
         if (part)
@@ -7223,20 +9446,76 @@ static void submit_car_shadow(uint32 slot)
             local = wheel_transform(&sample, 0);
             CompMatrixf(&body, &local, &transform);
         }
+        car->world[part] = transform;
+    }
+    VECTORF local = {car->body->bounds_center.x, car->body->bounds_center.y, car->body->bounds_center.z};
+    RotTransf(&body, &local, &car->bounds);
+    car->radius = car->body->bounds_radius + 128.0f;
+    car->presentation = player_cube.presentation;
+}
+
+static void submit_car_shadow(uint32 slot, const HD_DEPTH_VIEW *view)
+{
+    HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+    prepare_car_presentation(slot);
+    float uniforms[16][4] = {{0}};
+    MATRIXF camera = view->rotation;
+    VECTORF position = {view->position.x, view->position.y, view->position.z}, translated;
+    ApplyMatrixf(&camera, &position, &translated);
+    camera.t[0] = -translated.vx;
+    camera.t[1] = -translated.vy;
+    camera.t[2] = -translated.vz;
+    for (uint32 part = 0; part < (slot < CAR_RACE_MODEL_COUNT ? HD_SHADOW_TRANSFORMS : 1u); ++part)
+    {
+        MATRIXF transform;
+        CompMatrixf(&camera, &car->world[part], &transform);
         for (uint32 row = 0; row < 3; ++row)
         {
             memcpy(uniforms[part * 3 + row], transform.m[row], 3 * sizeof(float));
             uniforms[part * 3 + row][3] = transform.t[row];
         }
     }
-    uniforms[15][0] = 2.0f / sun_shadow.extent;
-    uniforms[15][1] = -2.0f / sun_shadow.extent;
-    uniforms[15][2] = 2.0f / sun_shadow.depth;
-    vid_viewport((VID_RECT){0, 0, HD_SHADOW_RESOLUTION, HD_SHADOW_RESOLUTION});
+    memcpy(uniforms[15], view->projection, sizeof(view->projection));
+    vid_viewport((VID_RECT){0, 0, view->resolution, view->resolution});
     vid_uniforms(&uniforms[0][0], 16);
     vid_pass(sun_shadow.material);
     vid_submit(car->geometry, car->indices, 0, car->index_count);
     ++sun_shadow.casters;
+}
+
+static void capture_cascade_cars(uint32 view, uint32 cascade)
+{
+    float extent = environment_shadow.extent[view][cascade], depth = environment_shadow.depth[view][cascade];
+    HD_DEPTH_VIEW pass = {0};
+    pass.rotation = environment_shadow.basis;
+    pass.resolution = HD_ENV_SHADOW_RESOLUTION;
+    pass.projection[0] = 2.0f / extent;
+    pass.projection[1] = -2.0f / extent;
+    pass.projection[2] = 2.0f / depth;
+    for (uint32 row = 0; row < 3; ++row)
+        for (uint32 axis = 0; axis < 3; ++axis)
+            pass.position.v[row] += pass.rotation.m[axis][row] *
+                (environment_shadow.center[view][cascade][axis] - (axis == 2 ? depth * 0.5f : 0.0f));
+    for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+    {
+        const HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+        if (!car->active)
+            continue;
+        float radius = car->body->bounds_radius + 128.0f;
+        for (uint32 axis = 0; axis < 3; ++axis)
+            radius += fabsf(car->body->bounds_center.v[axis]);
+        uint32 outside = 0;
+        for (uint32 axis = 0; axis < 3; ++axis)
+        {
+            float half = (axis == 2 ? depth : extent) * 0.5f;
+            outside |= fabsf(car->center[axis] - environment_shadow.center[view][cascade][axis]) > half + radius;
+        }
+        if (!outside)
+        {
+            submit_car_shadow(slot, &pass);
+            ++environment_shadow.draws;
+        }
+    }
 }
 
 static void capture_sun_shadow(void)
@@ -7255,7 +9534,7 @@ static void capture_sun_shadow(void)
         sun_shadow.casters = 0;
         return;
     }
-    zone = lighting_zone(car_states[race_view.primary_car].lighting_zone);
+    zone = lighting_zone(0);
     forward = (VECTORF){-zone.direction.vx / 4096.0f, -zone.direction.vy / 4096.0f, -zone.direction.vz / 4096.0f};
     length = sqrtf(forward.vx * forward.vx + forward.vy * forward.vy + forward.vz * forward.vz);
     if (length < 0.0001f)
@@ -7300,7 +9579,7 @@ static void capture_sun_shadow(void)
         if (car->reference == UINT32_MAX || car->geometry == NULL)
             continue;
         draw = &hd.model_draws[car->reference];
-        hd_pose_interpolate(&draw->poses.object[0], &draw->poses.object[1], hd.render_phase, &object);
+        hd_pose_interpolate(&draw->instance->poses.object[0], &draw->instance->poses.object[1], hd.render_phase, &object);
         for (uint32 view = 0; view < hd.views; ++view)
         {
             HD_POSE camera;
@@ -7336,7 +9615,14 @@ static void capture_sun_shadow(void)
         }
     prepare_shadow_target();
     prepare_scene();
-    sun_shadow.active = 1;
+    if (TD5_HD_CASCADE_CARS)
+    {
+        // cascades own sun occlusion; keep the shared light frame and lamp geometry
+        sun_shadow.sample_count = 0;
+        sun_shadow.casters = 0;
+        sun_shadow.ready = 1;
+        return;
+    }
     sun_shadow.casters = 0;
     MatrixQuatf(&sun_shadow.basis, &sun_shadow.camera.rotation);
     for (slot = 0; slot < HD_SHADOW_CARS; ++slot)
@@ -7362,12 +9648,18 @@ static void capture_sun_shadow(void)
             for (column = 0; column < 3; ++column)
                 ((float *)&sun_shadow.camera.position)[row] += sun_shadow.basis.m[column][row] * (car->center[column] - (column == 2 ? sun_shadow.depth * 0.5f : 0.0f));
         }
-        submit_car_shadow(slot);
+        HD_DEPTH_VIEW pass = {0};
+        pass.rotation = sun_shadow.basis;
+        pass.position = sun_shadow.camera.position;
+        pass.resolution = HD_SHADOW_RESOLUTION;
+        pass.projection[0] = 2.0f / sun_shadow.extent;
+        pass.projection[1] = -2.0f / sun_shadow.extent;
+        pass.projection[2] = 2.0f / sun_shadow.depth;
+        submit_car_shadow(slot, &pass);
         ++rendered;
     }
     if (rendered && completed)
         completed = vid_end();
-    sun_shadow.active = 0;
     sun_shadow.ready = completed != 0 && rendered != 0;
     if (sun_shadow.ready)
         ++sun_shadow.captures;
@@ -7376,16 +9668,23 @@ static void capture_sun_shadow(void)
 static void capture_player_cube(void)
 {
     static const float basis[6][9] = {{0, 0, -1, 0, 1, 0, 1, 0, 0}, {0, 0, 1, 0, 1, 0, -1, 0, 0}, {1, 0, 0, 0, 0, -1, 0, 1, 0}, {1, 0, 0, 0, 0, 1, 0, -1, 0}, {1, 0, 0, 0, 1, 0, 0, 0, 1}, {-1, 0, 0, 0, 1, 0, 0, 0, -1}};
-    static const char vertex[] = "uniform vec4 uDraw[32];layout(location=0) in vec4 aPos;layout(location=3) in vec4 aNormal;out vec3 ray;out float strength;"
-                                 "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;"
-                                 "void main(){vec3 p=vec3(dot(uDraw[0].xyz,aPos.xyz)+uDraw[0].w,dot(uDraw[1].xyz,aPos.xyz)+uDraw[1].w,dot(uDraw[2].xyz,aPos.xyz)+uDraw[2].w);"
-                                 "vec3 n=normalize(vec3(dot(uDraw[0].xyz,aNormal.xyz),dot(uDraw[1].xyz,aNormal.xyz),dot(uDraw[2].xyz,aNormal.xyz)));"
-                                 "vec3 r=reflect(normalize(p),n);ray=vec3(dot(uDraw[26].xyz,r),dot(uDraw[27].xyz,r),dot(uDraw[28].xyz,r));"
-                                 "strength=clamp(uDraw[12].y/128.0,0.0,1.0)*(0.4+0.6*pow(1.0-abs(dot(normalize(p),n)),5.0));"
-                                 "float z=(uDraw[3].w+uDraw[3].z)/(uDraw[3].w-uDraw[3].z)*p.z-2.0*uDraw[3].w*uDraw[3].z/(uDraw[3].w-uDraw[3].z);"
-                                 "gl_Position=vec4(p.x*uDraw[3].x+uDraw[4].x*p.z,-p.y*uDraw[3].y+uDraw[4].y*p.z,z,p.z);vUV=vec2(0.0);vColor=vec4(1.0);vDepth=p.z;vFog=vec2(0.0);}";
-    static const char fragment[] = "in vec3 ray;in float strength;"
-                                   "void main(){outColor=vec4(texture(uTex,normalize(ray)).rgb,strength);}";
+    static const char vertex[] = HD_SURFACE_GLSL "uniform vec4 uDraw[32];layout(location=0) in vec4 aPos;layout(location=3) in vec4 aNormal;"
+                                                 "out vec3 viewPosition;out vec3 viewNormal;flat out vec4 profile;out float gain;"
+                                                 "out vec2 vUV;out vec4 vColor;out float vDepth;out vec2 vFog;"
+                                                 "void main(){int id=int(floor(aNormal.w*0.5));profile=id>0&&id<surfaceProfiles.length()?surfaceProfiles[id]:vec4(0.0);"
+                                                 "vec3 p=vec3(dot(uDraw[0].xyz,aPos.xyz)+uDraw[0].w,dot(uDraw[1].xyz,aPos.xyz)+uDraw[1].w,dot(uDraw[2].xyz,aPos.xyz)+uDraw[2].w);"
+                                                 "viewPosition=p;viewNormal=vec3(dot(uDraw[0].xyz,aNormal.xyz),dot(uDraw[1].xyz,aNormal.xyz),dot(uDraw[2].xyz,aNormal.xyz));"
+                                                 "gain=clamp(uDraw[12].y/128.0,0.0,1.0);"
+                                                 "float z=(uDraw[3].w+uDraw[3].z)/(uDraw[3].w-uDraw[3].z)*p.z-2.0*uDraw[3].w*uDraw[3].z/(uDraw[3].w-uDraw[3].z);"
+                                                 "gl_Position=vec4(p.x*uDraw[3].x+uDraw[4].x*p.z,-p.y*uDraw[3].y+uDraw[4].y*p.z,z,p.z);"
+                                                 "if(uDraw[31]!=vec4(0.0))gl_Position.z=dot(uDraw[31],vec4(p,1.0));"
+                                                 "vUV=vec2(0.0);vColor=vec4(1.0);vDepth=p.z;vFog=vec2(0.0);}";
+    static const char fragment[] = "in vec3 viewPosition;in vec3 viewNormal;flat in vec4 profile;in float gain;uniform vec4 uDraw[32];"
+                                   "void main(){vec3 n=normalize(viewNormal),v=-normalize(viewPosition);float nv=abs(dot(n,v));vec3 r=reflect(-v,n);vec3 ray=vec3(dot(uDraw[26].xyz,r),dot(uDraw[27].xyz,r),dot(uDraw[28].xyz,r));"
+                                   "float grazing=pow(1.0-nv,5.0),fresnel=0.4+0.6*grazing;float coat=0.25*profile.z;"
+                                   "vec3 base=textureLod(uTex,ray,2.0*profile.x*profile.x).rgb;"
+                                   "if(coat>0.0){vec3 top=textureLod(uTex,ray,0.0).rgb;float f=0.04+0.96*grazing;base=mix(base,top,coat*f);}"
+                                   "outColor=vec4(base,0.375*gain*fresnel);}";
     HD_VIEW saved[HD_VIEWS];
     HD_POSE car;
     uint32 face, view;
@@ -7402,7 +9701,8 @@ static void capture_player_cube(void)
         data = vid_mat_data(player_cube.material);
         data->shader = player_cube.shader;
         data->texture = vid_target_texture(player_cube.target);
-        data->filter = VID_FILTER_LINEAR;
+        vid_tex_set_mip_levels(data->texture, 3);
+        data->filter = VID_FILTER_ANISOTROPIC;
         data->blend = VID_BLEND_ALPHA;
         data->depth_test = 1;
         data->cull = 0;
@@ -7412,13 +9712,22 @@ static void capture_player_cube(void)
     memcpy(saved, hd.viewports, sizeof(saved));
     hd_pose_interpolate(&hd.car_motion[0][race_view.primary_car].previous, &hd.car_motion[0][race_view.primary_car].current, hd.render_phase, &car);
     player_cube.camera.position = car.position;
-    player_cube.camera.position.y -= 128.0f;
-    player_cube.active = 1;
+    const HD_MODEL *body = sun_shadow.cars[race_view.primary_car].body;
+    XASSERT(body != NULL);
+    if (body == NULL)
+        return;
+    MATRIXF body_rotation;
+    QuatMatrixf(&car.rotation, &body_rotation);
+    // capture at the interpolated body center
+    for (uint32 row = 0; row < 3; ++row)
+        for (uint32 axis = 0; axis < 3; ++axis)
+            player_cube.camera.position.v[row] += body_rotation.m[row][axis] * body->bounds_center.v[axis];
+    set_color_pass(HD_PASS_CUBE, &player_cube.camera, &player_cube.camera_matrix);
     player_cube.faces = 0;
     player_cube.command_count = 0;
     if (!vid_begin(hd.clear[0], hd.clear[1], hd.clear[2]))
     {
-        player_cube.active = 0;
+        set_color_pass(HD_PASS_MAIN, NULL, NULL);
         return;
     }
     upload_vram();
@@ -7432,10 +9741,11 @@ static void capture_player_cube(void)
             vid_cancel();
             break;
         }
-        scene_batch_cursor = &scene_batch_banks;
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
         IdentityMatrixf(&rotation);
         memcpy(rotation.m, basis[face], sizeof(rotation.m));
         MatrixQuatf(&rotation, &player_cube.camera.rotation);
+        QuatMatrixf(&player_cube.camera.rotation, &player_cube.camera_matrix);
         for (view = 0; view < hd.views; ++view)
         {
             hd.viewports[view].viewport = (VID_RECT){0, 0, HD_CUBE_RESOLUTION, HD_CUBE_RESOLUTION};
@@ -7467,13 +9777,302 @@ static void capture_player_cube(void)
     }
     else
         vid_cancel();
-    player_cube.active = 0;
+    set_color_pass(HD_PASS_MAIN, NULL, NULL);
     memcpy(hd.viewports, saved, sizeof(saved));
     player_cube.ready = player_cube.faces == 6;
     if (!player_cube.ready)
         return;
     player_cube.serial = hd.motion_serial;
     ++player_cube.captures;
+}
+
+sint32 hd_wet_reflections_active(void)
+{
+    return hd.initialized && hd.wetness[1] > 0.0001f;
+}
+
+sint32 hd_spatial_lighting(void)
+{
+    return hd.race_frame && local_lights.texture != NULL;
+}
+
+static void local_light_write(float *records, VECTORF position, VECTORF direction, float radius, const float color[3], float outer, float inner)
+{
+    if (local_lights.count == HD_LOCAL_LIGHT_COUNT || radius <= 0.0f)
+        return;
+    if (outer < 0.0f)
+        for (uint32 index = 0; index < local_lights.count; ++index)
+        {
+            const float *other = records + index * 12;
+            if (other[7] < 0.0f && fabsf(other[0] - (position.vx - local_lights.origin.x)) + fabsf(other[1] - (position.vy - local_lights.origin.y)) + fabsf(other[2] - (position.vz - local_lights.origin.z)) < 1.0f)
+                return;
+        }
+    float *row = records + local_lights.count * 12;
+    row[0] = position.vx - local_lights.origin.x;
+    row[1] = position.vy - local_lights.origin.y;
+    row[2] = position.vz - local_lights.origin.z;
+    row[3] = radius;
+    row[4] = direction.vx;
+    row[5] = direction.vy;
+    row[6] = direction.vz;
+    row[7] = outer;
+    memcpy(row + 8, color, 3 * sizeof(float));
+    row[11] = inner;
+    ++local_lights.count;
+}
+
+static void prepare_local_lights(void)
+{
+    uint32 selected[HD_LOCAL_CARS], required = hd.views == 2 ? 2 : 1, count = required;
+    HD_POSE player;
+    if (!hd.race_frame || hd.paused || local_lights.texture == NULL || local_lights.presentation == player_cube.presentation)
+        return;
+    local_lights.presentation = player_cube.presentation;
+    if (local_lights.candidate_serial != hd.motion_serial || local_lights.candidate_generation != hd.motion_generation || local_lights.candidate_views != hd.views)
+    {
+        collect_registered_lights();
+        ++hd_work.lamp_searches;
+        local_lights.candidate_serial = hd.motion_serial;
+        local_lights.candidate_generation = hd.motion_generation;
+        local_lights.candidate_views = hd.views;
+    }
+    local_lights.count = 0;
+    local_lights.shadow_count = 0;
+    hd_pose_interpolate(&hd.car_motion[0][race_view.primary_car].previous, &hd.car_motion[0][race_view.primary_car].current, hd.render_phase, &player);
+    local_lights.origin = player.position;
+    selected[0] = hd.views == 2 ? 0 : race_view.primary_car;
+    if (hd.views == 2)
+        selected[1] = 1;
+    XASSERT(race_control.car_count <= HD_LOCAL_CARS);
+    for (uint32 slot = 0; slot < race_control.car_count; ++slot)
+    {
+        if (slot == selected[0] || (required == 2 && slot == selected[1]) || hd.car_motion[0][slot].generation != hd.motion_generation || hd.car_motion[0][slot].serial != hd.motion_serial)
+            continue;
+        if ((slot < 6 && race_session.time_trial != 0) || (slot >= 6 && race_rules.traffic == 0))
+            continue;
+        selected[count++] = slot;
+    }
+    float *records = (float *)vid_tex_data(local_lights.texture);
+    for (uint32 item = 0; item < count && (scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0; ++item)
+    {
+        uint32 slot = selected[item];
+        HD_POSE car;
+        MATRIXF rotation;
+        if (sun_shadow.cars[slot].presentation == player_cube.presentation && sun_shadow.cars[slot].reference != UINT32_MAX)
+        {
+            car = sun_shadow.cars[slot].pose;
+            rotation = sun_shadow.cars[slot].world[0];
+        }
+        else
+        {
+            hd_pose_interpolate(&hd.car_motion[0][slot].previous, &hd.car_motion[0][slot].current, hd.render_phase, &car);
+            QuatMatrixf(&car.rotation, &rotation);
+        }
+        float front = car_lamp_points[slot][2].vz + car_lamp_points[slot][3].vz;
+        float rear = car_lamp_points[slot][0].vz + car_lamp_points[slot][1].vz;
+        VECTORF axis = {0, 0.045f, front >= rear ? 1.0f : -1.0f}, direction;
+        float length = sqrtf(1.0f + axis.vy * axis.vy);
+        axis.vy /= length;
+        axis.vz /= length;
+        ApplyMatrixf(&rotation, &axis, &direction);
+        for (uint32 lamp = 2; lamp < 4; ++lamp)
+        {
+            const SVECTOR *point = &car_lamp_points[slot][lamp];
+            // original glow anchors sit on the road; physical emitters need height
+            VECTORF local = {(float)point->vx, fminf((float)point->vy, -(float)car_geometry_metrics[slot].wheel_radius), (float)point->vz}, position;
+            ApplyMatrixf(&rotation, &local, &position);
+            position.vx += car.position.x;
+            position.vy += car.position.y;
+            position.vz += car.position.z;
+            float color[3];
+            for (uint32 channel = 0; channel < 3; ++channel)
+                color[channel] = distance_lighting.color[channel] * 24.0f;
+            local_light_write(records, position, direction, distance_lighting.radius * 3.0f, color, 0.3448f, 0.8432f);
+        }
+    }
+    float radius = 2.0f * fmaxf(4096.0f, distance_lighting.radius);
+    uint32 requested[HD_LOCAL_LAMPS], requested_count = 0;
+    for (uint32 view = 0; view < hd.views; ++view)
+        for (uint32 item = 0; item < local_lights.lamp_count[view]; ++item)
+        {
+            uint32 id = local_lights.lamps[view * (HD_LOCAL_LAMPS / hd.views) + item] + 1;
+            if (!local_lights.points[id - 1].lamp)
+                continue;
+            uint32 found = 0;
+            for (uint32 index = 0; index < requested_count; ++index)
+                found |= requested[index] == id;
+            if (!found)
+                requested[requested_count++] = id;
+        }
+    double clock = (double)hd.motion_serial + hd.render_phase;
+    float step = local_lights.selection_clock == 0.0 ? 1.0f : fminf(1.0f, fmaxf(0.0f, (float)(clock - local_lights.selection_clock) * 0.25f));
+    local_lights.selection_clock = clock;
+    for (uint32 layer = 0; layer < HD_LOCAL_LAMPS; ++layer)
+    {
+        uint32 wanted = 0;
+        for (uint32 index = 0; index < requested_count; ++index)
+            wanted |= local_lights.layer_owner[layer] == requested[index];
+        local_lights.layer_gain[layer] = wanted ? fminf(1.0f, local_lights.layer_gain[layer] + step) : fmaxf(0.0f, local_lights.layer_gain[layer] - step);
+        if (!wanted && local_lights.layer_gain[layer] == 0.0f)
+            local_lights.layer_owner[layer] = 0;
+    }
+    for (uint32 index = 0; index < requested_count; ++index)
+    {
+        uint32 found = 0;
+        for (uint32 layer = 0; layer < HD_LOCAL_LAMPS; ++layer)
+            found |= local_lights.layer_owner[layer] == requested[index];
+        if (found)
+            continue;
+        for (uint32 layer = 0; layer < HD_LOCAL_LAMPS; ++layer)
+            if (local_lights.layer_owner[layer] == 0)
+            {
+                local_lights.layer_owner[layer] = requested[index];
+                local_lights.layer_gain[layer] = step;
+                break;
+            }
+    }
+    uint32 static_count = 0;
+    for (uint32 layer = 0; layer < HD_LOCAL_LAMPS; ++layer)
+    {
+        if (local_lights.layer_owner[layer] == 0 || local_lights.layer_gain[layer] <= 0.0f)
+            continue;
+        const HD_POINT_LIGHT *point = &local_lights.points[local_lights.layer_owner[layer] - 1];
+        VECTORF position = point->position;
+        float closest = FLT_MAX;
+        for (uint32 player_view = 0; player_view < hd.views; ++player_view)
+        {
+            uint32 slot = hd.views == 2 ? player_view : race_view.primary_car;
+            HD_POSE anchor;
+            hd_pose_interpolate(&hd.car_motion[player_view][slot].previous, &hd.car_motion[player_view][slot].current, hd.render_phase, &anchor);
+            float dx = position.vx - anchor.position.x, dy = position.vy - anchor.position.y, dz = position.vz - anchor.position.z;
+            closest = fminf(closest, dx * dx + dy * dy + dz * dz);
+        }
+        float activation = 16.0f * fmaxf(4096.0f, distance_lighting.radius);
+        float fade = fminf(1.0f, fmaxf(0.0f, (activation - sqrtf(closest)) / (activation * 0.25f)));
+        fade = fade * fade * (3.0f - 2.0f * fade) * local_lights.layer_gain[layer];
+        if (fade <= 0.0f)
+            continue;
+        float color[3];
+        for (uint32 channel = 0; channel < 3; ++channel)
+            color[channel] = point->color[channel] * (64.0f * fade);
+        uint32 light = local_lights.count;
+        local_light_write(records, position, (VECTORF){0}, radius, color, -3.0f, -1.0f);
+        if (local_lights.count == light)
+            continue;
+        ++static_count;
+        float *row = records + light * 12;
+        row[4] = (float)(HD_SHADOW_LAYERS + layer);
+        row[5] = 16.0f;
+        row[6] = radius;
+        local_lights.shadow_lights[local_lights.shadow_count++] = light;
+    }
+    for (uint32 view = 0; view < hd.views && static_count < HD_LOCAL_LAMPS; ++view)
+        for (uint32 item = 0; item < local_lights.lamp_count[view] && static_count < HD_LOCAL_LAMPS; ++item)
+        {
+            uint32 id = local_lights.lamps[view * (HD_LOCAL_LAMPS / hd.views) + item];
+            const HD_POINT_LIGHT *point = &local_lights.points[id];
+            if (point->lamp)
+                continue;
+            const HD_POSE *anchor = &hd.car_motion[view][hd.views == 2 ? view : race_view.primary_car].current;
+            VECTORF position = {anchor->position.x + lighting_delta(point->position.vx - anchor->position.x), anchor->position.y + lighting_delta(point->position.vy - anchor->position.y), anchor->position.z + lighting_delta(point->position.vz - anchor->position.z)};
+            uint32 light = local_lights.count;
+            local_light_write(records, position, (VECTORF){0}, point->radius, point->color, -1.0f, -1.0f);
+            static_count += local_lights.count != light;
+        }
+}
+
+static void capture_lamp_shadows(void)
+{
+    if (!hd.race_frame || hd.paused || local_lights.texture == NULL || local_lights.shadow_count == 0)
+        return;
+    HD_DEPTH_VIEW pass = {0};
+    static const float basis[9] = {1, 0, 0, 0, 0, 1, 0, -1, 0};
+    memcpy(pass.rotation.m, basis, sizeof(basis));
+    pass.resolution = HD_SHADOW_RESOLUTION;
+    float *records = (float *)vid_tex_data(local_lights.texture);
+    uint32 active = 0, masks[HD_LOCAL_LAMPS] = {0}, rendered = 0, parts = 0;
+    float limit = hd_far_plane() * 0.5f;
+    HD_POSE cameras[HD_VIEWS];
+    for (uint32 view = 0; view < hd.views; ++view)
+        hd_pose_interpolate(&hd.camera_motion[view].previous, &hd.camera_motion[view].current, hd.render_phase, &cameras[view]);
+    for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+    {
+        const HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+        if (car->reference == UINT32_MAX || car->geometry == NULL)
+            continue;
+        for (uint32 view = 0; view < hd.views; ++view)
+        {
+            const HD_POSE *camera = &cameras[view];
+            VEC3F delta = {{car->pose.position.x - camera->position.x, car->pose.position.y - camera->position.y, car->pose.position.z - camera->position.z}};
+            if (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z <= limit * limit)
+                active |= 1u << slot;
+        }
+    }
+    for (uint32 lamp = 0; lamp < local_lights.shadow_count; ++lamp)
+    {
+        float *record = records + local_lights.shadow_lights[lamp] * 12;
+        record[7] = -3.0f;
+        VECTORF position = {record[0] + local_lights.origin.x, record[1] + local_lights.origin.y, record[2] + local_lights.origin.z};
+        for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+        {
+            if ((active & (1u << slot)) == 0)
+                continue;
+            const HD_CAR_SHADOW *car = &sun_shadow.cars[slot];
+            VECTORF delta = {car->bounds.vx - position.vx, car->bounds.vy - position.vy, car->bounds.vz - position.vz}, p;
+            float radius = car->radius, range = record[3] + radius;
+            if (delta.vx * delta.vx + delta.vy * delta.vy + delta.vz * delta.vz > range * range)
+                continue;
+            ApplyMatrixf(&pass.rotation, &delta, &p);
+            if (p.vz + radius < record[5] || p.vz - radius > record[6])
+                continue;
+            float radial = sqrtf(p.vx * p.vx + p.vy * p.vy);
+            if (radial - 1.732050808f * p.vz > 2.0f * radius ||
+                (1.732050808f * radial + p.vz < 0.0f && radial * radial + p.vz * p.vz > radius * radius))
+                continue;
+            masks[lamp] |= 1u << slot;
+        }
+    }
+    sint32 completed = 1;
+    for (uint32 lamp = 0; lamp < local_lights.shadow_count && completed; ++lamp)
+    {
+        if (!masks[lamp])
+            continue;
+        prepare_shadow_target();
+        float *record = records + local_lights.shadow_lights[lamp] * 12;
+        pass.position = (VEC3F){{record[0] + local_lights.origin.x, record[1] + local_lights.origin.y, record[2] + local_lights.origin.z}};
+        float near = record[5], far = record[6];
+        pass.projection[0] = 0.577350269f;
+        pass.projection[1] = -0.577350269f;
+        pass.projection[2] = (far + near) / (far - near);
+        pass.projection[3] = -2.0f * far * near / (far - near);
+        if (!parts && !vid_begin(0, 0, 0))
+        {
+            completed = 0;
+            break;
+        }
+        uint32 layer = (uint32)record[4];
+        completed = parts ? vid_target_next_part(layer) : vid_target_select_depth_layer(sun_shadow.target, layer);
+        if (!completed)
+        {
+            vid_cancel();
+            break;
+        }
+        for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+            if (masks[lamp] & (1u << slot))
+            {
+                submit_car_shadow(slot, &pass);
+                ++local_lights.shadow_draws;
+            }
+        rendered |= 1u << lamp;
+        ++parts;
+    }
+    if (parts && completed)
+        completed = vid_end();
+    if (completed)
+        for (uint32 lamp = 0; lamp < local_lights.shadow_count; ++lamp)
+            if (rendered & (1u << lamp))
+                records[local_lights.shadow_lights[lamp] * 12 + 7] = -2.0f;
+    local_lights.shadow_captures += completed && parts != 0;
 }
 
 void hd_present_frame(uint64 processed_field, uint32 fields)
@@ -7512,12 +10111,22 @@ void hd_present_frame(uint64 processed_field, uint32 fields)
     if (hd.render_phase > 1.0f)
         hd.render_phase = 1.0f;
     ++player_cube.presentation;
+    prepare_billboard_shadow_facing();
+    prepare_scene();
+    for (uint32 slot = 0; slot < HD_SHADOW_CARS; ++slot)
+        prepare_car_presentation(slot);
+    prepare_local_lights();
     capture_sun_shadow();
+    capture_lamp_shadows();
+    if (hd.race_frame && !hd.paused && local_lights.count)
+        vid_tex_commit_rows(local_lights.texture, 0, local_lights.count);
+    capture_environment_shadow();
     capture_player_cube();
+    capture_resolved_world();
     if (vid_begin(hd.clear[0], hd.clear[1], hd.clear[2]))
     {
         upload_vram();
-        scene_batch_cursor = &scene_batch_banks;
+        scene_batch_cursor = &scene_batch_banks[color_pass.kind == HD_PASS_CUBE];
         if (hd.paused)
             submit_frozen_scene();
         submit_scene();
@@ -7563,6 +10172,7 @@ void hd_pause_begin(void)
     uint32 view;
     if (!hd.initialized)
         return;
+    paused_world.ready = 0;
     hd.pause_phase = game_hd_frame ? hd.presented_phase : 1.0f;
     if (hd.collecting)
         hd_end_frame();
@@ -7604,6 +10214,7 @@ void hd_pause_end(void)
     XASSERT(!hd.collecting);
     swap_scene_buffers(&hd.frozen);
     hd.paused = 0;
+    paused_world.ready = 0;
     ++hd.motion_generation;
 }
 
@@ -7613,6 +10224,24 @@ void hd_end_frame(void)
         return;
     if (game_hd_frame && hd.race_frame)
         XASSERT(hd.race_pose_views == (1u << hd.views) - 1u);
+    if (hd.race_frame && !hd.paused && hd.wetness_serial != hd.motion_serial)
+    {
+        float rain = effect_rain_amount();
+        hd.rain_fog[0] = hd.rain_fog[1];
+        float rain_target = fminf(1.0f, fmaxf(0.0f, rain));
+        float fog_step = 1.0f / 120.0f;
+        hd.rain_fog[1] += fminf(fog_step, fmaxf(-fog_step, rain_target - hd.rain_fog[1]));
+        hd.wetness[0] = hd.wetness[1];
+        hd.wetness[1] = fminf(1.0f, fmaxf(hd.wetness_floor, hd.wetness[1] + (rain > 0.0f ? rain / 120.0f : -1.0f / 3600.0f)));
+        if (hd.wetness_serial + 1 != hd.motion_serial)
+        {
+            hd.wetness[0] = hd.wetness[1];
+            hd.rain_fog[0] = hd.rain_fog[1];
+        }
+        hd.wetness_serial = hd.motion_serial;
+    }
+    if (hd.race_frame && !hd.paused)
+        update_planar_surfaces();
     if (hd.capture_sources)
         prepare_scene();
     if (!game_hd_frame)
@@ -7811,7 +10440,7 @@ void hd_prepare_track_texture(HD_PREPARED_MODEL *model)
         object_texture_material(&draw, pass);
     if (preparation_active)
     {
-        shadow_pass(model->texture_asset != NULL ? object_texture_material(&draw, 0) : hd.environment_materials[0]);
+        bind_scene_material(model->texture_asset != NULL ? object_texture_material(&draw, 0) : hd.environment_materials[0]);
         vid_submit(model->geometry, model->indices, 0, model->index_count);
     }
 }
@@ -7856,7 +10485,7 @@ HD_PREPARED_MODEL *hd_prepare_model(const MODEL_RESOURCE *resource, HD_TRACK_IMA
     if (preparation_active)
         for (pass = 0; pass < (preparation_blends_ready ? 1u : (uint32)HD_BLEND_PASSES); ++pass)
         {
-            shadow_pass(model->texture_asset != NULL ? object_texture_material(&draw, pass) : hd.environment_materials[pass]);
+            bind_scene_material(model->texture_asset != NULL ? object_texture_material(&draw, pass) : hd.environment_materials[pass]);
             vid_submit(model->geometry, model->indices, 0, model->index_count);
         }
     if (model->texture_asset != NULL)
@@ -7871,7 +10500,7 @@ void hd_prepare_sky_model(const MODEL_RESOURCE *resource, const sint8 *visibilit
         model = create_model(resource, visibility, 0);
     if (model != NULL && preparation_active)
     {
-        shadow_pass(hd.sky_materials[0]);
+        bind_scene_material(hd.sky_materials[0]);
         vid_submit(model->geometry, model->indices, 0, model->index_count);
     }
 }
@@ -7890,6 +10519,7 @@ void hd_prepare_draw_capacity(uint32 count)
             *capacity = count;
         }
     }
+    reserve_submit_lists(count);
 }
 
 void hd_prepare_race_resources(void)
@@ -7900,7 +10530,18 @@ void hd_prepare_race_resources(void)
     if (!hd.initialized)
         return;
     XASSERT(!hd.collecting);
+    hd_post_prepare();
+    prepare_planar_targets();
     player_cube.reflection_strength = (float)car_states[0].environment.limit;
+    if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) != 0)
+        player_cube.reflection_strength = fmaxf(64.0f, player_cube.reflection_strength);
+    prepare_authored_lights();
+    if (local_lights.texture == NULL)
+    {
+        local_lights.texture = vid_tex_create_fmt(3, HD_LOCAL_LIGHT_COUNT, VID_RGBA32F);
+        XASSERT(local_lights.texture != NULL);
+        vid_tex_commit(local_lights.texture);
+    }
     upload_vram();
     preparation_blends_ready = 0;
     preparation_target = vid_target_create();
@@ -7926,7 +10567,9 @@ void hd_prepare_race_resources(void)
         player_cube.commands = (HD_CUBE_COMMAND *)realloc(player_cube.commands, player_cube.command_capacity * sizeof(*player_cube.commands));
         XASSERT(player_cube.commands != NULL);
     }
+    hd_road_begin();
     hd_track_prepare();
+    hd_road_end();
     hd_texture_sources_native(VRAM);
     for (car = 0; car < CAR_RACE_MODEL_COUNT; ++car)
     {
@@ -7969,14 +10612,13 @@ void hd_prepare_race_resources(void)
             if (find_model(resource, NULL, variant) == NULL)
                 create_model(resource, NULL, variant);
     }
-    if ((scene_level_image.bytes[scene_level_image.desc.header_offset + 30] & 1) == 0)
-        for (car = 0; car < race_control.car_count; ++car)
-        {
-            const MODEL_RESOURCE *resource = high_detail_car_resource(&car_states[car].render_models[0]);
-            HD_MODEL *model = resource->bytes ? find_model(resource, NULL, 0) : NULL;
-            if (model != NULL)
-                prepare_car_shadow(car, model);
-        }
+    for (car = 0; car < race_control.car_count; ++car)
+    {
+        const MODEL_RESOURCE *resource = high_detail_car_resource(&car_states[car].render_models[0]);
+        HD_MODEL *model = resource->bytes ? find_model(resource, NULL, 0) : NULL;
+        if (model != NULL)
+            prepare_car_shadow(car, model);
+    }
     hd_texture_sources_seal();
     hd_texture_sources_build_gpu();
     {
@@ -8013,7 +10655,7 @@ void hd_prepare_race_resources(void)
                 for (group = 0; group < model->source_group_count; ++group)
                 {
                     HD_CACHED_GROUP *source = &model->source_groups[group];
-                    shadow_pass(source_material(source->texture, 0, model->kind == 12 ? 0 : 2, source->transparent)->material);
+                    bind_scene_material(source_material(source->texture, 0, model->kind == 12 ? 0 : 2, source->transparent)->material);
                     vid_submit(model->geometry, model->indices, source->first, source->count);
                 }
             }
@@ -8049,6 +10691,7 @@ void hd_prepare_race_resources(void)
                 VID_MATERIAL_DATA *data = vid_mat_data(warm_material);
                 memset(data, 0, sizeof(*data));
                 data->shader = scene_batch_shader;
+                data->surface_write = 0;
                 data->texture = asset->image->texture;
                 data->filter = VID_FILTER_ANISOTROPIC;
                 data->depth_test = data->depth_write = 1;
@@ -8056,7 +10699,7 @@ void hd_prepare_race_resources(void)
                 data->params[4] = (float)asset->width;
                 data->params[5] = (float)asset->height;
                 vid_mat_commit(warm_material);
-                shadow_pass(warm_material);
+                bind_scene_material(warm_material);
                 vid_submit(warm_geometry, NULL, 0, 3);
                 break;
             }
@@ -8080,7 +10723,7 @@ void hd_prepare_race_resources(void)
                     for (pass = 0; pass < HD_BLEND_PASSES; ++pass)
                     {
                         vid_uniforms(&uniforms[0][0], world ? 30 : 4);
-                        shadow_pass(sprite_texture_material(sprite, pass, (sint32)world));
+                        bind_scene_material(sprite_texture_material(sprite, pass, (sint32)world));
                         vid_submit(sprite_geometry, NULL, 0, 3);
                     }
             }
@@ -8096,7 +10739,7 @@ void hd_prepare_race_resources(void)
                 vid_uniforms(&uniforms[0][0], 30);
                 for (pass = 0; pass < HD_BLEND_PASSES; ++pass)
                 {
-                    shadow_pass(sprite_texture_material(sprite, pass, 1));
+                    bind_scene_material(sprite_texture_material(sprite, pass, 1));
                     vid_submit(sprite_geometry, NULL, 0, 3);
                 }
             }
@@ -8108,7 +10751,7 @@ void hd_prepare_race_resources(void)
                 {
                     HD_MODEL *quad = &hd.skids[view][slot].model[part];
                     init_effect_quad(quad);
-                    shadow_pass(hd.effect_materials[0]);
+                    bind_scene_material(hd.effect_materials[0]);
                     vid_submit(quad->geometry, quad->indices, 0, 6);
                 }
             for (slot = 0; slot < 14; ++slot)
@@ -8116,7 +10759,7 @@ void hd_prepare_race_resources(void)
                 {
                     HD_MODEL *quad = &hd.shadows[view][slot][part].model;
                     init_effect_quad(quad);
-                    shadow_pass(hd.effect_materials[3]);
+                    bind_scene_material(hd.effect_materials[3]);
                     vid_submit(quad->geometry, quad->indices, 0, 6);
                 }
         }
